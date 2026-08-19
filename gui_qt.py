@@ -714,10 +714,20 @@ class MainWindow(QMainWindow):
         fl_layout.addWidget(self.obs_refresh_btn)
         layout.addLayout(fl_layout)
 
+        # Guide banner explaining action buttons clearly
+        guide_banner = QLabel(
+            "💡 <b>과목 조작 버튼 안내:</b> "
+            "<span style='color:#10b981;'><b>[⚡ 즉시신청]</b> 지금 포털에 즉각 수강신청</span> | "
+            "<span style='color:#38bdf8;'><b>[🎯 스나이퍼]</b> 10:00:00 정각 일괄신청 목표에 담기</span> | "
+            "<span style='color:#f59e0b;'><b>[🏹 헌터등록]</b> 24시간 빈자리 취소표 감시 목록에 등록</span>"
+        )
+        guide_banner.setStyleSheet("background-color: #182234; color: #94a3b8; border: 1px solid #1e3a8a; border-radius: 8px; padding: 6px 12px; font-size: 11px;")
+        layout.addWidget(guide_banner)
+
         # Table
         self.obs_table = QTableWidget(0, 8)
         self.obs_table.setHorizontalHeaderLabels([
-            "상태", "학수-분반", "교과목명", "담당교수", "강의시간", "신청/여석", "영역/학과", "퀵 액션"
+            "상태", "학수-분반", "교과목명", "담당교수", "강의시간", "신청/여석", "영역/학과", "수강신청 / 모듈 담기"
         ])
         self.obs_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.obs_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -805,17 +815,20 @@ class MainWindow(QMainWindow):
             act_w = QWidget()
             act_l = QHBoxLayout(act_w)
             act_l.setContentsMargins(2, 2, 2, 2)
-            act_l.setSpacing(4)
+            act_l.setSpacing(6)
 
-            apply_btn = QPushButton("신청")
+            apply_btn = QPushButton("⚡ 즉시신청")
             apply_btn.setObjectName("primaryBtn")
+            apply_btn.setToolTip("해당 과목을 포털에 지금 즉시 1클릭 수강신청합니다.")
             apply_btn.clicked.connect(lambda ch, cd=c['code'], b=c['bun']: self.on_direct_apply(cd, b))
 
-            add_sniper_btn = QPushButton("+스나이퍼")
+            add_sniper_btn = QPushButton("🎯 스나이퍼")
+            add_sniper_btn.setToolTip("10:00:00 정각 스나이퍼 목표 목록에 이 과목을 추가합니다.")
             add_sniper_btn.clicked.connect(lambda ch, cd=c['code'], b=c['bun'], n=c['name']: self.add_to_sniper(cd, b, n))
 
-            add_hunter_btn = QPushButton("+헌터")
+            add_hunter_btn = QPushButton("🏹 헌터등록")
             add_hunter_btn.setObjectName("amberBtn")
+            add_hunter_btn.setToolTip("24시간 빈자리 취소표 헌터 감시 목록에 등록합니다.")
             add_hunter_btn.clicked.connect(lambda ch, cd=c['code'], b=c['bun'], n=c['name']: self.add_to_hunter(cd, b, n))
 
             act_l.addWidget(apply_btn)
