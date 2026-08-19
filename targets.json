@@ -1,0 +1,19 @@
+[
+  {"type": "major", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_3.jsp", "name": "스마트융합보안학과 전공"},
+  {"type": "major", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_1.jsp?ic_kwa=B41005&ic_kwa_1=AA0242", "name": "경영학과 전공"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41001&ppage=1", "name": "교양필수 (사표/영읽토/대순/AI)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42001&ppage=1", "name": "교선 1영역 (인간과소통)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42002&ppage=1", "name": "교선 2영역 (사회와경제)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42003&ppage=1", "name": "교선 3영역 (과학과기술)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42004&ppage=1", "name": "교선 4영역 (예술과문화)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42005&ppage=1", "name": "교선 5영역 (융합과혁신)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42006&ppage=1", "name": "교선 6영역 (AI·디지털리터러시)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42007&ppage=1", "name": "교선 7영역 (기타/평생/취업)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42008&ppage=1", "name": "교선 8영역 (사회봉사)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42009&ppage=1", "name": "교선 9영역 (전공탐색)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B4200A&ppage=1", "name": "교선 A영역 (인터넷/위성)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B4200B&ppage=1", "name": "교선 B영역 (기타)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B4200C&ppage=1", "name": "교선 C영역 (DUCC)"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41004&ppage=1", "name": "교직"},
+  {"type": "ge", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41020&ppage=1", "name": "일반선택"}
+]

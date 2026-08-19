@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Daejin University Real-time Course Vacancy Observer (대진대 수강신청 실시간 빈자리 옵저버)
-=======================================================================================
-- Features:
-  1. Automated high-speed background scraper for all Major and General Education courses.
-  2. Live In-Memory Course State & Vacancy Change Event History.
-  3. Web UI Dashboard with real-time search, filters, vacancy sound alerts, and 1-click code copying.
-  4. REST API (/api/data, /api/events, /api/status).
+Daejin University Real-time Course Vacancy Observer (High-Performance SSE & Zero-Downtime Hot-Reload)
+===================================================================================================
+- Backwards compatible with legacy polling (/api/data)
+- High-concurrency Server-Sent Events (SSE) streaming (/api/stream)
+- Zero-Downtime State Persistence: loads last cache on startup instantly
+- Dynamic Hot-Reload of monitoring targets (targets.json) without process restarts
+- Multi-threaded parallel crawler for Major (스마트융합보안, 경영학과 등), 교필, 교선 1~6영역
 """
 
 import os
@@ -15,38 +15,40 @@ import sys
 import time
 import json
 import re
-import random
 import logging
-import threading
+import asyncio
 import datetime
+from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+from typing import Set, List, Dict
+
 import requests
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
-
-from flask import Flask, jsonify, render_template_string, request
+from requests.adapters import HTTPAdapter
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import uvicorn
 
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-logger = logging.getLogger("WebObserver")
+logger = logging.getLogger("DaejinObserver")
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+TARGETS_PATH = os.path.join(BASE_DIR, "targets.json")
+CACHE_PATH = os.path.join(BASE_DIR, "db_cache.json")
+
 BASE_URL = "https://dreams2.daejin.ac.kr"
 LOGIN_API_URL = f"{BASE_URL}/sugang/NLoginB"
-GE_QUERY_URL = f"{BASE_URL}/sugang/new/sugang_wlsn0417_2.jsp"
-MAJOR_QUERY_URL = f"{BASE_URL}/sugang/new/sugang_wlsn0417_3.jsp"
 
-app = Flask(__name__)
-
-# Global In-Memory Store
-course_db = {}
-event_history = []
+# Global In-Memory State
+course_db: Dict[str, dict] = {}
+event_history: List[dict] = []
 stats = {
     "total_courses": 0,
     "open_courses": 0,
@@ -55,13 +57,53 @@ stats = {
     "scrape_latency_ms": 0,
     "status": "Initializing"
 }
-db_lock = threading.Lock()
+cached_json_response = b'{"stats":{},"events":[],"courses":[]}'
+subscribers: Set[asyncio.Queue] = set()
+crawler_running = True
 
 
-class CourseCrawler(threading.Thread):
-    def __init__(self, config_path="config.json"):
-        super().__init__(daemon=True)
-        with open(config_path, "r", encoding="utf-8") as f:
+def load_state_cache():
+    global course_db, event_history, stats, cached_json_response
+    if os.path.exists(CACHE_PATH):
+        try:
+            with open(CACHE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                course_db = data.get("courses", {})
+                event_history = data.get("events", [])
+                stats = data.get("stats", stats)
+                open_cnt = sum(1 for c in course_db.values() if c.get("seats", 0) > 0)
+                stats["total_courses"] = len(course_db)
+                stats["open_courses"] = open_cnt
+                stats["status"] = "Live Streaming"
+                cached_json_response = json.dumps({
+                    "stats": stats,
+                    "events": event_history[:20],
+                    "courses": list(course_db.values())
+                }, ensure_ascii=False).encode("utf-8")
+                logger.info(f"💾 Restored state cache: {len(course_db)} courses ({open_cnt} open), {len(event_history)} events.")
+        except Exception as e:
+            logger.warning(f"Failed to load state cache: {e}")
+
+
+def save_state_cache():
+    try:
+        with open(CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "courses": course_db,
+                "events": event_history[:50],
+                "stats": stats
+            }, f, ensure_ascii=False)
+    except Exception as e:
+        logger.debug(f"Failed to save state cache: {e}")
+
+
+# Load cache immediately at module load time so there is ZERO blank screen on startup
+load_state_cache()
+
+
+class CourseCrawler:
+    def __init__(self):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             self.config = json.load(f)
 
         self.std_no = self.config.get("stdNo")
@@ -69,23 +111,29 @@ class CourseCrawler(threading.Thread):
         self.user_flag = self.config.get("user_flag", "1")
 
         self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        self.session.mount("https://", adapter)
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             "Referer": f"{BASE_URL}/sugang/new/main.jsp",
             "Origin": BASE_URL
         })
         self.last_login_time = 0
+        self.targets_mtime = 0
+        self.scrape_targets = []
+        self.reload_targets()
 
-        # Categories to scrape
-        self.ge_categories = [
-            {"kwa": "B41001", "name": "교양필수 (사고와표현/영읽토/대순/AI컴퓨팅)"},
-            {"kwa": "B41002", "name": "AI·디지털리터러시 & 교양선택"},
-            {"kwa": "B41003", "name": "인간과사회 (교선)"},
-            {"kwa": "B41004", "name": "과학과기술 (교선)"},
-            {"kwa": "B41005", "name": "예술과체육 (교선)"},
-            {"kwa": "B41006", "name": "글로벌과세계 (교선)"},
-            {"kwa": "B41007", "name": "융복합과진로 (교선)"}
-        ]
+    def reload_targets(self):
+        if os.path.exists(TARGETS_PATH):
+            try:
+                mtime = os.path.getmtime(TARGETS_PATH)
+                if mtime != self.targets_mtime:
+                    with open(TARGETS_PATH, "r", encoding="utf-8") as f:
+                        self.scrape_targets = json.load(f)
+                    self.targets_mtime = mtime
+                    logger.info(f"🎯 Loaded {len(self.scrape_targets)} scrape targets from targets.json")
+            except Exception as e:
+                logger.error(f"Error loading targets: {e}")
 
     def login(self):
         login_data = {
@@ -98,7 +146,7 @@ class CourseCrawler(threading.Thread):
             text = r.content.decode("euc-kr", "replace")
             if "main.jsp" in text or "location.href" in text or r.status_code == 200:
                 self.last_login_time = time.time()
-                logger.info("✅ Scraper session active.")
+                logger.info("✅ Scraper session authenticated.")
                 return True
             return False
         except Exception as e:
@@ -109,116 +157,108 @@ class CourseCrawler(threading.Thread):
         if time.time() - self.last_login_time > 600:
             self.login()
 
+    def fetch_url(self, url):
+        try:
+            r = self.session.get(url, timeout=3.5)
+            return r.content.decode("euc-kr", "replace")
+        except Exception:
+            return ""
+
     def parse_table_html(self, html, category_name):
         courses = []
-        if BeautifulSoup:
-            soup = BeautifulSoup(html, "html.parser")
-            for tr in soup.find_all("tr"):
-                row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                if len(row) >= 10 and "-" in row[1] and len(row[1]) == 9:
-                    code_parts = row[1].split("-")
-                    code = code_parts[0]
-                    bun = code_parts[1]
-                    full_code = f"{code}{bun}"
+        if not html:
+            return courses
 
-                    enrolled = int(row[7]) if row[7].isdigit() else 0
-                    seats = int(row[8]) if row[8].isdigit() else 0
-                    credits_val = row[9] if len(row) > 9 else "2"
-                    room = row[10] if len(row) > 10 else ""
-                    remarks = row[11] if len(row) > 11 else ""
+        soup = BeautifulSoup(html, "html.parser")
+        for tr in soup.find_all("tr"):
+            row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            if len(row) >= 10 and "-" in row[1] and len(row[1]) == 9 and row[1] != "교과번호-분반":
+                code_parts = row[1].split("-")
+                code = code_parts[0]
+                bun = code_parts[1]
+                full_code = f"{code}{bun}"
 
-                    courses.append({
-                        "full_code": full_code,
-                        "code": code,
-                        "bun": bun,
-                        "name": row[3],
-                        "prof": row[4],
-                        "time": row[5],
-                        "type": row[6] if len(row) > 6 else "",
-                        "enrolled": enrolled,
-                        "seats": seats,
-                        "credits": credits_val,
-                        "room": room,
-                        "remarks": remarks,
-                        "category": category_name,
-                        "status": "OPEN" if seats > 0 else "FULL"
-                    })
-        else:
-            # Pure regex table row parsing
-            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL)
-            for tr in rows:
-                cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', tr, re.DOTALL)]
-                if len(cols) >= 10 and "-" in cols[1] and len(cols[1]) == 9:
-                    code_parts = cols[1].split("-")
-                    code = code_parts[0]
-                    bun = code_parts[1]
-                    full_code = f"{code}{bun}"
+                enrolled = int(row[7]) if row[7].isdigit() else 0
+                seats = int(row[8]) if row[8].isdigit() else 0
+                credits_val = row[9] if len(row) > 9 else "2"
+                room = row[10] if len(row) > 10 else ""
+                remarks = row[11] if len(row) > 11 else ""
 
-                    enrolled = int(cols[7]) if cols[7].isdigit() else 0
-                    seats = int(cols[8]) if cols[8].isdigit() else 0
-                    credits_val = cols[9] if len(cols) > 9 else "2"
-                    room = cols[10] if len(cols) > 10 else ""
-                    remarks = cols[11] if len(cols) > 11 else ""
-
-                    courses.append({
-                        "full_code": full_code,
-                        "code": code,
-                        "bun": bun,
-                        "name": cols[3],
-                        "prof": cols[4],
-                        "time": cols[5],
-                        "type": cols[6] if len(cols) > 6 else "",
-                        "enrolled": enrolled,
-                        "seats": seats,
-                        "credits": credits_val,
-                        "room": room,
-                        "remarks": remarks,
-                        "category": category_name,
-                        "status": "OPEN" if seats > 0 else "FULL"
-                    })
+                courses.append({
+                    "full_code": full_code,
+                    "code": code,
+                    "bun": bun,
+                    "name": row[3],
+                    "prof": row[4],
+                    "time": row[5],
+                    "type": row[6] if len(row) > 6 else "",
+                    "enrolled": enrolled,
+                    "seats": seats,
+                    "credits": credits_val,
+                    "room": room,
+                    "remarks": remarks,
+                    "category": category_name,
+                    "status": "OPEN" if seats > 0 else "FULL"
+                })
         return courses
 
     def scrape_cycle(self):
+        global cached_json_response
         self.ensure_session()
+        self.reload_targets()
+
         t0 = time.perf_counter()
         scraped_courses = []
 
-        # 1. Scrape Major Courses (Smart Convergence Security)
-        try:
-            r = self.session.get(MAJOR_QUERY_URL, timeout=4)
-            html = r.content.decode("euc-kr", "replace")
-            major_courses = self.parse_table_html(html, "스마트융합보안학과 전공")
-            scraped_courses.extend(major_courses)
-        except Exception as e:
-            logger.warning(f"Major scrape error: {e}")
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            p1_results = list(ex.map(lambda t: (t["url"], t["name"], self.fetch_url(t["url"])), self.scrape_targets))
 
-        # 2. Scrape General Education Categories
-        for cat in self.ge_categories:
-            try:
-                url = f"{GE_QUERY_URL}?ic_kwa={cat['kwa']}&ppage=1"
-                r = self.session.get(url, timeout=4)
-                html = r.content.decode("euc-kr", "replace")
-                ge_courses = self.parse_table_html(html, cat["name"])
-                scraped_courses.extend(ge_courses)
-            except Exception as e:
-                logger.warning(f"GE scrape error ({cat['name']}): {e}")
+        all_page_jobs = []
+        for base_url, cat_name, html in p1_results:
+            if not html:
+                continue
+
+            scraped_courses.extend(self.parse_table_html(html, cat_name))
+
+            max_page = 1
+            soup = BeautifulSoup(html, "html.parser")
+            pagination = soup.find("div", class_="pagination")
+            if pagination:
+                pages = re.findall(r"setPage\(\x27(\d+)\x27\)", str(pagination))
+                if pages:
+                    max_page = max(int(p) for p in pages)
+
+            if max_page > 1:
+                for p in range(2, max_page + 1):
+                    p_url = re.sub(r"ppage=\d+", f"ppage={p}", base_url)
+                    if "ppage=" not in p_url:
+                        p_url += f"?ppage={p}" if "?" not in p_url else f"&ppage={p}"
+                    all_page_jobs.append((p_url, cat_name))
+
+        if all_page_jobs:
+            with ThreadPoolExecutor(max_workers=12) as ex:
+                rem_results = list(ex.map(lambda job: (job[1], self.fetch_url(job[0])), all_page_jobs))
+            for cat_name, html in rem_results:
+                if html:
+                    scraped_courses.extend(self.parse_table_html(html, cat_name))
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
-
-        # Update Course DB and detect vacancy changes
         now_str = datetime.datetime.now(KST).strftime("%H:%M:%S")
+
+        changes = []
+        new_events = []
         open_count = 0
 
-        with db_lock:
-            for c in scraped_courses:
-                key = c["full_code"]
-                prev = course_db.get(key)
-                
-                # Check for vacancy change event (e.g. 0 -> 1+ seats or seats increased)
-                if prev:
+        for c in scraped_courses:
+            key = c["full_code"]
+            prev = course_db.get(key)
+
+            if prev:
+                if prev["seats"] != c["seats"] or prev["enrolled"] != c["enrolled"]:
+                    changes.append(c)
                     if prev["seats"] == 0 and c["seats"] > 0:
                         event_msg = f"🔥 [빈자리 발생!] {c['name']} ({c['code']}-{c['bun']}) {c['seats']}석 오픈! (교수: {c['prof']} / 시간: {c['time']})"
-                        event_history.insert(0, {
+                        ev = {
                             "time": now_str,
                             "type": "VACANCY_OPEN",
                             "code": c["code"],
@@ -226,10 +266,12 @@ class CourseCrawler(threading.Thread):
                             "name": c["name"],
                             "seats": c["seats"],
                             "msg": event_msg
-                        })
+                        }
+                        new_events.insert(0, ev)
+                        event_history.insert(0, ev)
                         logger.info(event_msg)
                     elif prev["seats"] > 0 and c["seats"] == 0:
-                        event_history.insert(0, {
+                        ev = {
                             "time": now_str,
                             "type": "VACANCY_FILLED",
                             "code": c["code"],
@@ -237,56 +279,168 @@ class CourseCrawler(threading.Thread):
                             "name": c["name"],
                             "seats": 0,
                             "msg": f"⏳ [마감] {c['name']} ({c['code']}-{c['bun']}) 잔여석 소진 (마감)"
-                        })
-                
-                c["last_updated"] = now_str
-                course_db[key] = c
-                if c["seats"] > 0:
-                    open_count += 1
+                        }
+                        new_events.insert(0, ev)
+                        event_history.insert(0, ev)
+            else:
+                changes.append(c)
 
-            # Keep only last 50 events
-            if len(event_history) > 50:
-                event_history[:] = event_history[:50]
+            c["last_updated"] = now_str
+            course_db[key] = c
+            if c["seats"] > 0:
+                open_count += 1
 
-            stats["total_courses"] = len(course_db)
-            stats["open_courses"] = open_count
-            stats["events_count"] = len(event_history)
-            stats["last_scraped_at"] = now_str
-            stats["scrape_latency_ms"] = round(elapsed_ms, 1)
-            stats["status"] = "Live Monitoring"
+        if len(event_history) > 50:
+            event_history[:] = event_history[:50]
 
-    def run(self):
-        logger.info("🚀 Course Crawler background thread started.")
-        self.login()
-        while True:
-            try:
-                self.scrape_cycle()
-            except Exception as e:
-                logger.error(f"Crawler cycle exception: {e}")
-            time.sleep(2.5) # Fast 2.5s scrape interval
+        stats["total_courses"] = len(course_db)
+        stats["open_courses"] = open_count
+        stats["events_count"] = len(event_history)
+        stats["last_scraped_at"] = now_str
+        stats["scrape_latency_ms"] = round(elapsed_ms, 1)
+        stats["status"] = "Live Streaming"
+
+        cached_json_response = json.dumps({
+            "stats": dict(stats),
+            "events": list(event_history[:20]),
+            "courses": list(course_db.values())
+        }, ensure_ascii=False).encode("utf-8")
+
+        save_state_cache()
+
+        return {
+            "changes": changes,
+            "new_events": new_events,
+            "stats": dict(stats)
+        }
+
+
+crawler = CourseCrawler()
+
+
+async def broadcast_worker():
+    global crawler_running
+    logger.info("🚀 Background Crawler & SSE Broadcaster Task running.")
+    crawler.login()
+    while crawler_running:
+        try:
+            diff = await asyncio.to_thread(crawler.scrape_cycle)
+            if subscribers and diff:
+                payload = {
+                    "type": "delta",
+                    "changes": diff.get("changes", []),
+                    "events": diff.get("new_events", []),
+                    "stats": diff.get("stats", {})
+                }
+                msg = f"event: update\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                dead_subs = set()
+                for q in list(subscribers):
+                    try:
+                        q.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        dead_subs.add(q)
+                for q in dead_subs:
+                    subscribers.discard(q)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Crawler loop exception: {e}")
+
+        try:
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            break
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global crawler_running
+    crawler_running = True
+    task = asyncio.create_task(broadcast_worker())
+    yield
+    crawler_running = False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("🛑 Crawler background task cleanly shut down.")
+
+
+app = FastAPI(title="Daejin Sugang Observer", lifespan=lifespan)
 
 
 # ==============================================================================
-# Web Routes & REST API
+# REST API (Backwards-compatible legacy polling & hot management)
 # ==============================================================================
 
-@app.route("/api/data")
-def get_data():
-    with db_lock:
-        courses_list = list(course_db.values())
-        events_list = list(event_history[:15])
-        current_stats = dict(stats)
-    return jsonify({
-        "stats": current_stats,
-        "events": events_list,
-        "courses": courses_list
-    })
+@app.head("/api/data")
+@app.get("/api/data")
+async def get_data():
+    return JSONResponse(
+        content=json.loads(cached_json_response.decode("utf-8")),
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+    )
 
 
-@app.route("/")
-def index():
-    html = """
-<!DOCTYPE html>
+@app.post("/api/reload_targets")
+async def reload_targets_api():
+    crawler.reload_targets()
+    return {"status": "ok", "targets_count": len(crawler.scrape_targets)}
+
+
+# ==============================================================================
+# SSE Real-time Push Endpoint
+# ==============================================================================
+
+@app.get("/api/stream")
+async def sse_stream(request: Request):
+    q = asyncio.Queue(maxsize=30)
+    subscribers.add(q)
+
+    # Initial snapshot
+    init_data = json.dumps({
+        "type": "init",
+        "courses": list(course_db.values()),
+        "events": list(event_history[:20]),
+        "stats": dict(stats)
+    }, ensure_ascii=False)
+    await q.put(f"event: init\ndata: {init_data}\n\n")
+
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield data
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            subscribers.discard(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# ==============================================================================
+# Web Dashboard HTML
+# ==============================================================================
+
+HTML_CONTENT = """<!DOCTYPE html>
 <html lang="ko" class="dark">
 <head>
   <meta charset="UTF-8">
@@ -327,11 +481,11 @@ def index():
         <div>
           <h1 class="text-lg font-bold flex items-center gap-2">
             대진대 수강신청 실시간 옵저버
-            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot"></span> LIVE
+            <span id="connBadge" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot"></span> <span id="connLabel">SSE 연결 중</span>
             </span>
           </h1>
-          <p class="text-xs text-zinc-400">실시간 강좌 잔여석 및 취소표 감지 시스템</p>
+          <p class="text-xs text-zinc-400">전공(스마트융합보안, 경영학과) 및 교양 전체 영역 실시간 취소표 감지</p>
         </div>
       </div>
       
@@ -358,7 +512,7 @@ def index():
       <div class="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl">
         <div class="text-xs text-zinc-400 font-medium mb-1">총 모니터링 강좌</div>
         <div id="statTotal" class="text-2xl font-bold text-zinc-100 font-mono">0</div>
-        <div class="text-[11px] text-zinc-500 mt-1">전공 + 교양 전 영역</div>
+        <div class="text-[11px] text-zinc-500 mt-1">전공 + 교필 + 교선 전영역</div>
       </div>
       <div class="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl relative overflow-hidden">
         <div class="absolute right-3 top-3 w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400 text-xs font-bold">
@@ -371,12 +525,12 @@ def index():
       <div class="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl">
         <div class="text-xs text-zinc-400 font-medium mb-1">취소표 감지 피드</div>
         <div id="statEvents" class="text-2xl font-bold text-amber-400 font-mono">0</div>
-        <div class="text-[11px] text-zinc-500 mt-1">오늘 감지된 변동 건수</div>
+        <div class="text-[11px] text-zinc-500 mt-1">실시간 감지된 변동 건수</div>
       </div>
       <div class="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl">
-        <div class="text-xs text-zinc-400 font-medium mb-1">모니터링 상태</div>
-        <div id="statStatus" class="text-lg font-bold text-blue-400 truncate">정상 가동</div>
-        <div class="text-[11px] text-zinc-500 mt-1">2.5초 주기 실시간 갱신</div>
+        <div class="text-xs text-zinc-400 font-medium mb-1">모니터링 모드</div>
+        <div id="statStatus" class="text-lg font-bold text-blue-400 truncate">초고속 스트림</div>
+        <div class="text-[11px] text-zinc-500 mt-1">실시간 즉각 푸시(SSE)</div>
       </div>
     </div>
 
@@ -386,9 +540,9 @@ def index():
         <h2 class="text-sm font-bold flex items-center gap-2 text-zinc-200">
           <i class="fa-solid fa-bolt text-amber-400"></i> 실시간 취소표 발생 피드
         </h2>
-        <span class="text-[11px] text-zinc-500">최근 15건 실시간 스트림</span>
+        <span class="text-[11px] text-zinc-500">실시간 스트림 (최근 20건)</span>
       </div>
-      <div id="eventsContainer" class="space-y-1.5 max-h-32 overflow-y-auto pr-1 text-xs font-mono">
+      <div id="eventsContainer" class="space-y-1.5 max-h-36 overflow-y-auto pr-1 text-xs font-mono">
         <div class="text-zinc-500 italic py-2 text-center">아직 감지된 취소표 이벤트가 없습니다. 실시간 감시 중...</div>
       </div>
     </div>
@@ -399,7 +553,7 @@ def index():
         <!-- Search Input -->
         <div class="relative flex-1">
           <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-zinc-500 text-sm"></i>
-          <input id="searchInput" type="text" placeholder="과목명, 교수명, 학수번호(6자리) 검색..." 
+          <input id="searchInput" type="text" placeholder="과목명, 교수명, 학수번호(6자리), 요일 검색..." 
                  class="w-full pl-10 pr-4 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500 transition"
                  oninput="renderCourses()">
         </div>
@@ -408,12 +562,31 @@ def index():
         <select id="categoryFilter" onchange="renderCourses()"
                 class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-blue-500">
           <option value="ALL">전체 영역 / 학과</option>
-          <option value="스마트융합보안">스마트융합보안학과 전공</option>
-          <option value="교양필수">교양필수 (사표/영읽토/대순)</option>
-          <option value="AI·디지털">AI·디지털리터러시</option>
-          <option value="인간과사회">인간과사회</option>
-          <option value="과학과기술">과학과기술</option>
-          <option value="예술과체육">예술과체육</option>
+          <option value="스마트융합보안">스마트융합보안 전공</option>
+          <option value="경영학과">경영학과 전공</option>
+          <option value="교양필수">교양필수 (사표/영읽토/대순/AI)</option>
+          <option value="교양선택">교양선택 전체</option>
+          <option value="1영역">교선 1영역 (인간과소통)</option>
+          <option value="2영역">교선 2영역 (사회와경제)</option>
+          <option value="3영역">교선 3영역 (과학과기술)</option>
+          <option value="4영역">교선 4영역 (예술과문화)</option>
+          <option value="5영역">교선 5영역 (융합과혁신)</option>
+          <option value="6영역">교선 6영역 (AI·디지털리터러시)</option>
+          <option value="교직">교직</option>
+          <option value="일반선택">일반선택</option>
+        </select>
+
+        <!-- Sort Select -->
+        <select id="sortSelect" onchange="onSortDropdownChange()"
+                class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-blue-500">
+          <option value="SEATS_DESC">⚡ 여석 많은 순 (기본)</option>
+          <option value="SEATS_ASC">🔥 여석 적은 순 (마감임박)</option>
+          <option value="NAME_ASC">🔤 과목명 (가나다순)</option>
+          <option value="NAME_DESC">🔤 과목명 (역순)</option>
+          <option value="CODE_ASC">🔢 학수번호순</option>
+          <option value="PROF_ASC">👨‍🏫 교수명순</option>
+          <option value="ENROLLED_DESC">👥 신청자 많은 순 (인기)</option>
+          <option value="ENROLLED_ASC">👥 신청자 적은 순</option>
         </select>
 
         <!-- Toggle Open Only -->
@@ -430,20 +603,34 @@ def index():
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
       <div class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between text-xs text-zinc-400">
         <span id="filteredCount">0개 강좌 표시 중</span>
-        <span>클릭하여 학수번호-분반 복사</span>
+        <span>학수번호 클릭 시 클립보드에 자동 복사</span>
       </div>
 
       <div class="overflow-x-auto">
         <table class="w-full text-left text-sm">
           <thead class="bg-zinc-950/70 text-zinc-400 text-xs uppercase border-b border-zinc-800">
             <tr>
-              <th class="py-3 px-4">상태</th>
-              <th class="py-3 px-4">학수-분반</th>
-              <th class="py-3 px-4">교과목명</th>
-              <th class="py-3 px-4">담당교수</th>
-              <th class="py-3 px-4">강의시간</th>
-              <th class="py-3 px-4">신청/여석</th>
-              <th class="py-3 px-4">영역/학과</th>
+              <th onclick="setSort('seats')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                상태 / 여석 <span id="sort_icon_seats">▼</span>
+              </th>
+              <th onclick="setSort('code')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                학수-분반 <span id="sort_icon_code"></span>
+              </th>
+              <th onclick="setSort('name')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                교과목명 <span id="sort_icon_name"></span>
+              </th>
+              <th onclick="setSort('prof')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                담당교수 <span id="sort_icon_prof"></span>
+              </th>
+              <th onclick="setSort('time')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                강의시간 <span id="sort_icon_time"></span>
+              </th>
+              <th onclick="setSort('enrolled')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                신청/여석 <span id="sort_icon_enrolled"></span>
+              </th>
+              <th onclick="setSort('category')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
+                영역/학과 <span id="sort_icon_category"></span>
+              </th>
               <th class="py-3 px-4 text-right">복사</th>
             </tr>
           </thead>
@@ -461,9 +648,12 @@ def index():
   <audio id="alertAudio" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" preload="auto"></audio>
 
   <script>
-    let allCourses = [];
+    let courseMap = new Map();
+    let eventsList = [];
     let soundEnabled = true;
     let knownOpenKeys = new Set();
+    let isInitialized = false;
+    let eventSource = null;
 
     function toggleSound() {
       soundEnabled = !soundEnabled;
@@ -488,44 +678,14 @@ def index():
       });
     }
 
-    async function fetchData() {
-      try {
-        const res = await fetch('/api/data');
-        const data = await res.json();
-
-        // Update Stats
-        document.getElementById('statTotal').innerText = data.stats.total_courses;
-        document.getElementById('statOpen').innerText = data.stats.open_courses;
-        document.getElementById('statEvents').innerText = data.stats.events_count;
-        document.getElementById('statStatus').innerText = data.stats.status;
-        document.getElementById('lastUpdated').innerText = data.stats.last_scraped_at;
-        document.getElementById('scrapeLatency').innerText = data.stats.scrape_latency_ms + 'ms';
-
-        // Check for new vacancies and play sound
-        let hasNewVacancy = false;
-        data.courses.forEach(c => {
-          if (c.seats > 0 && !knownOpenKeys.has(c.full_code)) {
-            knownOpenKeys.add(c.full_code);
-            hasNewVacancy = true;
-          } else if (c.seats === 0 && knownOpenKeys.has(c.full_code)) {
-            knownOpenKeys.delete(c.full_code);
-          }
-        });
-
-        if (hasNewVacancy) {
-          playBeep();
-        }
-
-        // Update Events Feed
-        renderEvents(data.events);
-
-        // Update Courses
-        allCourses = data.courses;
-        renderCourses();
-
-      } catch (err) {
-        console.error('Fetch error:', err);
-      }
+    function updateStatsUI(s) {
+      if (!s) return;
+      document.getElementById('statTotal').innerText = s.total_courses || 0;
+      document.getElementById('statOpen').innerText = s.open_courses || 0;
+      document.getElementById('statEvents').innerText = s.events_count || 0;
+      document.getElementById('statStatus').innerText = s.status || 'Live';
+      document.getElementById('lastUpdated').innerText = s.last_scraped_at || '-';
+      document.getElementById('scrapeLatency').innerText = (s.scrape_latency_ms || 0) + 'ms';
     }
 
     function renderEvents(events) {
@@ -535,7 +695,7 @@ def index():
         return;
       }
 
-      container.innerHTML = events.map(e => {
+      container.innerHTML = events.slice(0, 20).map(e => {
         const isOpen = e.type === 'VACANCY_OPEN';
         return `
           <div class="flex items-center justify-between py-1 px-2.5 rounded-lg ${isOpen ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300' : 'bg-zinc-800/40 text-zinc-400'}">
@@ -552,26 +712,129 @@ def index():
       }).join('');
     }
 
+    let currentSort = 'SEATS_DESC';
+
+    function setSort(field) {
+      if (field === 'seats') {
+        currentSort = currentSort === 'SEATS_DESC' ? 'SEATS_ASC' : 'SEATS_DESC';
+      } else if (field === 'name') {
+        currentSort = currentSort === 'NAME_ASC' ? 'NAME_DESC' : 'NAME_ASC';
+      } else if (field === 'code') {
+        currentSort = currentSort === 'CODE_ASC' ? 'CODE_DESC' : 'CODE_ASC';
+      } else if (field === 'prof') {
+        currentSort = currentSort === 'PROF_ASC' ? 'PROF_DESC' : 'PROF_ASC';
+      } else if (field === 'enrolled') {
+        currentSort = currentSort === 'ENROLLED_DESC' ? 'ENROLLED_ASC' : 'ENROLLED_DESC';
+      } else if (field === 'time') {
+        currentSort = currentSort === 'TIME_ASC' ? 'TIME_DESC' : 'TIME_ASC';
+      } else if (field === 'category') {
+        currentSort = currentSort === 'CAT_ASC' ? 'CAT_DESC' : 'CAT_ASC';
+      }
+      const selectElem = document.getElementById('sortSelect');
+      if (selectElem) selectElem.value = currentSort;
+      renderCourses();
+    }
+
+    function onSortDropdownChange() {
+      currentSort = document.getElementById('sortSelect').value;
+      renderCourses();
+    }
+
+    function updateSortHeaderIcons() {
+      const icons = {
+        sort_icon_seats: '',
+        sort_icon_code: '',
+        sort_icon_name: '',
+        sort_icon_prof: '',
+        sort_icon_time: '',
+        sort_icon_enrolled: '',
+        sort_icon_category: ''
+      };
+      if (currentSort === 'SEATS_DESC') icons.sort_icon_seats = '▼';
+      else if (currentSort === 'SEATS_ASC') icons.sort_icon_seats = '▲';
+      else if (currentSort === 'CODE_ASC') icons.sort_icon_code = '▲';
+      else if (currentSort === 'CODE_DESC') icons.sort_icon_code = '▼';
+      else if (currentSort === 'NAME_ASC') icons.sort_icon_name = '▲';
+      else if (currentSort === 'NAME_DESC') icons.sort_icon_name = '▼';
+      else if (currentSort === 'PROF_ASC') icons.sort_icon_prof = '▲';
+      else if (currentSort === 'PROF_DESC') icons.sort_icon_prof = '▼';
+      else if (currentSort === 'ENROLLED_DESC') icons.sort_icon_enrolled = '▼';
+      else if (currentSort === 'ENROLLED_ASC') icons.sort_icon_enrolled = '▲';
+      else if (currentSort === 'TIME_ASC') icons.sort_icon_time = '▲';
+      else if (currentSort === 'TIME_DESC') icons.sort_icon_time = '▼';
+      else if (currentSort === 'CAT_ASC') icons.sort_icon_category = '▲';
+      else if (currentSort === 'CAT_DESC') icons.sort_icon_category = '▼';
+
+      for (const [id, arrow] of Object.entries(icons)) {
+        const el = document.getElementById(id);
+        if (el) el.innerText = arrow;
+      }
+    }
+
     function renderCourses() {
       const search = document.getElementById('searchInput').value.trim().toLowerCase();
       const cat = document.getElementById('categoryFilter').value;
       const openOnly = document.getElementById('openOnlyToggle').checked;
 
+      const allCourses = Array.from(courseMap.values());
+
       const filtered = allCourses.filter(c => {
         if (openOnly && c.seats <= 0) return false;
-        if (cat !== 'ALL' && !c.category.includes(cat)) return false;
+        if (cat !== 'ALL') {
+          if (cat === '교양선택') {
+            if (!c.category.includes('교선') && !c.category.includes('교양선택')) return false;
+          } else if (!c.category.includes(cat)) {
+            return false;
+          }
+        }
         if (search) {
           const matchCode = c.full_code.toLowerCase().includes(search) || c.code.toLowerCase().includes(search);
           const matchName = c.name.toLowerCase().includes(search);
-          const matchProf = c.prof.toLowerCase().includes(search);
-          const matchTime = c.time.toLowerCase().includes(search);
-          if (!matchCode && !matchName && !matchProf && !matchTime) return false;
+          const matchProf = (c.prof || '').toLowerCase().includes(search);
+          const matchTime = (c.time || '').toLowerCase().includes(search);
+          const matchCat = (c.category || '').toLowerCase().includes(search);
+          if (!matchCode && !matchName && !matchProf && !matchTime && !matchCat) return false;
         }
         return true;
       });
 
-      // Sort: Open seats first, then by code
-      filtered.sort((a, b) => b.seats - a.seats || a.code.localeCompare(b.code));
+      // Apply Sort
+      if (currentSort === 'SEATS_DESC') {
+        filtered.sort((a, b) => b.seats - a.seats || a.code.localeCompare(b.code));
+      } else if (currentSort === 'SEATS_ASC') {
+        filtered.sort((a, b) => {
+          if (a.seats > 0 && b.seats > 0) return a.seats - b.seats || a.code.localeCompare(b.code);
+          if (a.seats > 0) return -1;
+          if (b.seats > 0) return 1;
+          return a.code.localeCompare(b.code);
+        });
+      } else if (currentSort === 'NAME_ASC') {
+        filtered.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+      } else if (currentSort === 'NAME_DESC') {
+        filtered.sort((a, b) => b.name.localeCompare(a.name, 'ko'));
+      } else if (currentSort === 'CODE_ASC') {
+        filtered.sort((a, b) => a.full_code.localeCompare(b.full_code));
+      } else if (currentSort === 'CODE_DESC') {
+        filtered.sort((a, b) => b.full_code.localeCompare(a.full_code));
+      } else if (currentSort === 'PROF_ASC') {
+        filtered.sort((a, b) => (a.prof || '').localeCompare(b.prof || '', 'ko'));
+      } else if (currentSort === 'PROF_DESC') {
+        filtered.sort((a, b) => (b.prof || '').localeCompare(a.prof || '', 'ko'));
+      } else if (currentSort === 'ENROLLED_DESC') {
+        filtered.sort((a, b) => b.enrolled - a.enrolled || a.code.localeCompare(b.code));
+      } else if (currentSort === 'ENROLLED_ASC') {
+        filtered.sort((a, b) => a.enrolled - b.enrolled || a.code.localeCompare(b.code));
+      } else if (currentSort === 'TIME_ASC') {
+        filtered.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+      } else if (currentSort === 'TIME_DESC') {
+        filtered.sort((a, b) => (b.time || '').localeCompare(a.time || ''));
+      } else if (currentSort === 'CAT_ASC') {
+        filtered.sort((a, b) => (a.category || '').localeCompare(b.category || '', 'ko'));
+      } else if (currentSort === 'CAT_DESC') {
+        filtered.sort((a, b) => (b.category || '').localeCompare(a.category || '', 'ko'));
+      }
+
+      updateSortHeaderIcons();
 
       document.getElementById('filteredCount').innerText = `${filtered.length}개 강좌 표시 중`;
 
@@ -621,24 +884,106 @@ def index():
       }).join('');
     }
 
-    // Polling loop every 2 seconds
-    fetchData();
-    setInterval(fetchData, 2000);
+    function initSSE() {
+      if (!!window.EventSource) {
+        eventSource = new EventSource('/api/stream');
+
+        eventSource.addEventListener('init', (e) => {
+          const data = JSON.parse(e.data);
+          courseMap.clear();
+          (data.courses || []).forEach(c => {
+            courseMap.set(c.full_code, c);
+            if (c.seats > 0) knownOpenKeys.add(c.full_code);
+          });
+          eventsList = data.events || [];
+          updateStatsUI(data.stats);
+          renderEvents(eventsList);
+          renderCourses();
+          isInitialized = true;
+
+          document.getElementById('connBadge').className = "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+          document.getElementById('connLabel').innerText = "SSE 라이브";
+        });
+
+        eventSource.addEventListener('update', (e) => {
+          const data = JSON.parse(e.data);
+          let hasNewVacancy = false;
+
+          (data.changes || []).forEach(c => {
+            const prev = courseMap.get(c.full_code);
+            courseMap.set(c.full_code, c);
+
+            if (c.seats > 0) {
+              if (isInitialized && !knownOpenKeys.has(c.full_code)) {
+                hasNewVacancy = true;
+              }
+              knownOpenKeys.add(c.full_code);
+            } else {
+              knownOpenKeys.delete(c.full_code);
+            }
+          });
+
+          if (hasNewVacancy) {
+            playBeep();
+          }
+
+          if (data.events && data.events.length > 0) {
+            eventsList = [...data.events, ...eventsList].slice(0, 50);
+            renderEvents(eventsList);
+          }
+
+          updateStatsUI(data.stats);
+          renderCourses();
+        });
+
+        eventSource.onerror = (err) => {
+          console.warn('SSE disconnected, falling back to polling...', err);
+          document.getElementById('connBadge').className = "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20";
+          document.getElementById('connLabel').innerText = "폴링 백업";
+          fallbackPolling();
+        };
+      } else {
+        fallbackPolling();
+      }
+    }
+
+    let pollingTimer = null;
+    async function fallbackPolling() {
+      if (pollingTimer) return;
+      pollingTimer = setInterval(async () => {
+        try {
+          const res = await fetch('/api/data');
+          const data = await res.json();
+          courseMap.clear();
+          (data.courses || []).forEach(c => {
+            courseMap.set(c.full_code, c);
+            if (c.seats > 0) knownOpenKeys.add(c.full_code);
+          });
+          updateStatsUI(data.stats);
+          renderEvents(data.events);
+          renderCourses();
+        } catch (e) {
+          console.error("Polling error:", e);
+        }
+      }, 3000);
+    }
+
+    // Start
+    initSSE();
   </script>
 </body>
-</html>
-    """
-    return render_template_string(html)
+</html>"""
+
+@app.head("/")
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return HTMLResponse(content=HTML_CONTENT)
 
 
 def main():
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
-    crawler = CourseCrawler(cfg_path)
-    crawler.start()
-    
     port = int(os.environ.get("PORT", 8888))
-    logger.info(f"🌐 Daejin Sugang Web Observer starting on http://0.0.0.0:{port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info(f"🌐 Daejin Sugang High-Perf SSE Observer starting on http://0.0.0.0:{port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning", timeout_graceful_shutdown=2)
 
 
 if __name__ == "__main__":

@@ -7,3 +7,4 @@ screenshots/
 __pycache__/
 .env
 .venv
+db_cache.json

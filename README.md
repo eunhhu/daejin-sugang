@@ -1,67 +1,154 @@
-# Daejin Sugang Automation (대진대학교 초고속 수강신청 자동화 도구)
+# 🎓 대진대학교 초고속 실시간 수강신청 옵저버 & 자동화 스위트 (Daejin Sugang Suite)
 
-> ⚡ **Daejin University Course Registration Sniper Suite & Live Web Observer**  
-> 대진대학교 종합정보시스템(`dreams2.daejin.ac.kr`)의 수강신청 엔드포인트 역공학 분석을 바탕으로 제작된 **초정밀 수강신청 자동화 스나이퍼 & 실시간 웹 옵저버**입니다.
-
-🌐 **실시간 웹 옵저버 배포 주소**: **[https://daejin.qucord.com](https://daejin.qucord.com)**
+대진대학교(`dreams2.daejin.ac.kr`) 수강신청 시스템을 위한 **초고속 실시간 잔여석 모니터링(SSE 스트림 웹 대시보드)** 및 **직접 패킷 인젝션 기반 자동 수강신청/취소표 스나이핑 스위트**입니다.
 
 ---
 
-## 📌 주요 모듈 및 4가지 실행 엔진
+## 🌐 1. 실시간 웹 옵저버 대시보드 (`https://daejin.qucord.com`)
 
-### 1. 🌐 Real-time Web Observer (`web_observer.py`) - **[전과목 실시간 옵저버 웹사이트]**
-* **배포 링크**: `https://daejin.qucord.com` (Cloudflare Tunnel HTTPS)
-* **기능**:
-  - 전공 및 교양 전 영역 148개+ 전 강좌의 잔여석을 2.5초 주기로 초고속 백그라운드 스크래핑
-  - **🔥 실시간 취소표 발생 피드 스트림**: 취소표가 발생하는 즉시 상단 티커에 과목명/시간/잔여석 브리핑
-  - **🔔 사운드 비프 알림**: 화면 켜두고 다른 작업 중에도 취소표 발생 시 알림음 재생
-  - **🔍 스마트 검색 및 "빈자리만 보기" 토글** & 학수번호 1클릭 복사
+브라우저 DOM 및 자바스크립트 렌더링 오버헤드 없이 백그라운드에서 병렬 스크래핑한 실시간 잔여석 데이터를 웹으로 제공합니다.
 
-### 2. 🚀 Direct Packet Sniper (`packet_sniper.py`) - **[정각 올클리어]**
-* **방식**: 순수 HTTP/Requests 및 멀티스레드 기반 다이렉트 패킷 인젝션
-* **응답 속도**: 과목당 **`~0.005초`** (DOM 렌더링, 브라우저 자바스크립트 실행 오버헤드 0%)
-* **핵심 기능**:
-  - 대진대 서버 시계 오차(ms) 및 편도 네트워크 Ping(RTT/2) 실시간 자동 역산
-  - 10:00:00.000 정각 1ms 도달 즉시 고속 로그인 버스트(`NLoginB`)
-  - 신청 API(`/sugang/NSugangWlsn0410`)로 directForm 규격 패킷 연속 사출
-  - **초고속 서브 분반 Fallback 체인**: 1순위 분반 마감 시 **0.005초 만에 2순위/3순위 예비 분반으로 즉시 전환 신청**
-
-### 3. 🛡️ Credit-Aware Atomic Course Swapper (`atomic_swapper.py`) - **[18학점 하드제한 대응 아토믹 스왑]**
-* **방식**: 18학점 제한 시스템에서 기존 과목을 날리지 않고 원하는 과목으로 초고속 맞바꿔치기
-* **핵심 기능**:
-  - 목표 과목 잔여석 0석인 동안 기존 과목 100% 안전 유지
-  - 빈자리 감지 즉시 **기존 과목 취소(9ms) ➡️ 목표 과목 낚아채기(9ms) ➡️ 실패 시 0.005초 즉시 롤백 복구**
-
-### 4. 🎯 Vacancy Hunter (`vacancy_hunter.py`) - **[취소표 무한 줍기 스나이퍼]**
-* **방식**: 실시간 백그라운드 폴링 & 빈자리 발생 즉시 0.005초 낚아채기
-* **핵심 기능**:
-  - 세션 자동 유지(Keep-Alive) & 스마트 지터(Anti-Ban Jitter)
-  - 획득 성공 시 Discord DM 축하 알림 발송 및 자동 종료
+- 🌐 **공용 배포 주소**: **[https://daejin.qucord.com](https://daejin.qucord.com)**
+- ⚡ **단방향 SSE (Server-Sent Events) 스트림 (`/api/stream`)**:
+  - 클라이언트가 무겁게 전체 JSON을 폴링하지 않고 연결을 유지하다가, **빈자리 변동 발생 시 0.01초 만에 Diff 패킷만 실시간 푸시**.
+  - 네트워크 단절 시 자동 폴링 폴백(Fallback) 및 자동 재연결 지원.
+- 🎯 **광범위한 모니터링 영역 (총 510+ 과목 상시 감시)**:
+  - 1전공 (스마트융합보안학과 전공)
+  - 타전공 (경영학과 전공 등)
+  - 교양필수 (사고와표현, 영어읽기와토론, 대순사상과상생윤리, AI시대의컴퓨팅사고 등 전 분반)
+  - 교양선택 1~6영역 (인간과소통, 사회와경제, 과학과기술, 예술과문화, 융합과혁신, AI·디지털리터러시) 및 7~C영역 전체
+  - 교직 및 일반선택 강좌
+- 📊 **다채로운 정렬(Sort) 및 필터 기능**:
+  - **드롭다운 및 열 헤더 1클릭 정렬**: 여석 많은 순(기본), 여석 적은 순(마감임박 줍기용), 과목명순, 학수번호순, 교수명순, 신청자순.
+  - **카테고리별 분리**: 스마트융합보안, 경영학과, 교필, 교선 1~6영역별 전용 필터.
+  - **빈자리만 보기 토글**: 마감된 과목 제외하고 즉시 들어갈 수 있는 과목만 확인.
+- 🔔 **취소표 오디오 알림 & 티커 피드**:
+  - 마감 과목에 빈자리 발생 시 실시간 `삐-` 사운드 알림 및 상단 티커 피드 갱신.
+- 📋 **학수번호 1클릭 복사**:
+  - 우측 복사 버튼 클릭 시 `과목번호-분반`이 클립보드에 복사되어 빠른 수강신청 창에 `Ctrl+V` 가능.
 
 ---
 
-## 🛠️ 수강신청 엔드포인트 & 프로토콜 분석 (Reverse-Engineered)
+## 🛠 2. 통합 CLI 마스터 도구 (`sugang.py`)
 
-| 기능 | HTTP Method | URL 엔드포인트 | 주요 파라미터 규격 |
-| :--- | :--- | :--- | :--- |
-| **로그인 인증** | `POST` | `/sugang/NLoginB` | `stdNo` (학번), `passwd` (비밀번호), `user_flag` (1: 학부생) |
-| **빠른 수강신청** | `POST` | `/sugang/NSugangWlsn0410` | `dir=1`, `cmd=aply`, `urltype=direct`, `getsbjt_no` (6자리), `getclss_no` (2자리), `ic_sbjcd` (8자리) |
-| **수강 취소/삭제** | `POST` | `/sugang/NSugangWlsn0410` | `cmd=cancle`, `urltype=page`, `cousNm` (과목명), `jsg_subcd` (8자리) |
-| **신청 확인/취소** | `GET` | `/sugang/new/sugang_wlsn04110.jsp` | 확정 신청 내역 및 총 취득학점 테이블 파싱 |
-| **장바구니 조회** | `GET` | `/sugang/new/sugang_wlsn04120.jsp` | 예비수강신청 과목 목록 및 여석 조회 |
-| **전공강좌 조회** | `GET` | `/sugang/new/sugang_wlsn0417_3.jsp` | 스마트융합보안학과 개설 강좌 및 실시간 잔여석 |
-| **교양강좌 조회** | `GET` | `/sugang/new/sugang_wlsn0417_2.jsp` | `ic_kwa` (영역코드), `ic_kwa_1` (세부영역) |
-
----
-
-## 🚀 빠른 시작 (Quick Start)
+터미널에서 수강신청 상태 조회, 과목 검색, 즉시 신청, 서버 시간 동기화 등을 원클릭으로 실행할 수 있습니다.
 
 ```bash
-# 1. 패키지 설치
-pip install -r requirements.txt
+# 확정 수강신청 내역 및 취득/신청 가능 학점 확인
+python3 sugang.py status
 
-# 2. 웹 옵저버 실행
-python3 web_observer.py
+# 예비수강 장바구니 목록 및 실시간 잔여석 조회
+python3 sugang.py cart
 
-# 3. 브라우저에서 https://daejin.qucord.com 접속
+# 실시간 과목 검색 (과목명, 교수명, 학수번호, 강의시간)
+python3 sugang.py search "회계원리"
+python3 sugang.py search "김자원"
+
+# 현재 빈자리(여석 > 0) 있는 과목만 조회 (카테고리 필터 가능)
+python3 sugang.py open
+python3 sugang.py open "경영"
+
+# 특정 학과 개설 전공강좌 실시간 잔여석 조회
+python3 sugang.py dept 경영학과
+python3 sugang.py dept 컴공
+python3 sugang.py dept 보안
+
+# 단일 과목 즉시 초고속 수강신청 (패킷 직전송)
+python3 sugang.py apply 121001 01
+
+# 대진대 서버 정밀 시계 오차(Offset) 및 네트워크 RTT 측정
+python3 sugang.py sync
 ```
+
+---
+
+## 🚀 3. 자동 수강신청 & 취소표 스나이퍼 모듈
+
+### 🎯 1) 본 수강신청 10:00:00 정각 스나이퍼 (`packet_sniper.py`)
+- **방식**: 브라우저를 띄우지 않고 HTTP POST(`/sugang/NSugangWlsn0410`)를 직접 쏘는 방식 (과목당 ~0.005초 소요).
+- **특징**:
+  - 대진대 서버 `Date` 헤더 기반 마이크로초 단위 네트워크 지연시간(RTT) 보정.
+  - 10:00:00 정각 세션 획득 후 담아둔 과목 목록을 멀티스레드로 동시 사출.
+  - 마감 시 2지망 분반으로 5ms 안에 자동 스위칭(Fallback Chain).
+
+```bash
+# config.json에 등록된 장바구니/목표 과목을 10:00:00 정각에 자동 신청
+python3 packet_sniper.py config.json
+```
+
+### 🏹 2) 24시간 취소표 자동 주워담기 (`vacancy_hunter.py`)
+- **방식**: 마감된 목표 과목들의 잔여석을 백그라운드에서 고속 폴링하다가, 누군가 수강을 취소하는 즉시 0.01초 만에 신청 패킷을 전송해 낚아챔.
+- **특징**: 세션 만료 시 자동 재로그인(Keep-Alive), 성공 시 디스코드 DM 즉시 알림.
+
+```bash
+python3 vacancy_hunter.py config.json
+```
+
+### 🔄 3) 원자적 수강 교체 스와퍼 (`atomic_swapper.py`)
+- **방식**: 수강신청 학점이 꽉 찬 상태에서, 목표 과목에 자리가 나는 순간 **기존 수강과목을 취소(Drop)함과 동시에 목표과목을 신청(Apply)**하는 원자적 교환기.
+
+```bash
+# [버릴과목] 927430-25 (대순사상) -> [잡을과목] 922613-01 (AI와스마트라이프)
+python3 atomic_swapper.py config.json
+```
+
+---
+
+## ⚙️ 4. 설정 파일 구성 (`config.json` & `targets.json`)
+
+### `config.json` (계정 및 목표 과목 설정)
+```json
+{
+  "stdNo": "20261236",
+  "passwd": "YOUR_PASSWORD",
+  "user_flag": "1",
+  "target_time": "10:00:00",
+  "courses": [
+    { "code": "576006", "section": "01", "name": "자바프로그래밍언어" },
+    { "code": "577503", "section": "01", "name": "정보보호개론" }
+  ],
+  "hunter_targets": [
+    { "code": "922613", "section": "01", "name": "AI와스마트라이프" }
+  ],
+  "discord_bot_token": "",
+  "discord_channel_id": ""
+}
+```
+
+### `targets.json` (웹 옵저버 모니터링 대상 - 핫 리로드 지원)
+서버 재시작 없이 `targets.json`에 학과/영역 URL을 추가하면 옵저버가 실시간으로 자동 감지하여 모니터링에 반영합니다.
+
+```json
+[
+  { "type": "major", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_3.jsp", "name": "스마트융합보안학과 전공" },
+  { "type": "major", "url": "https://dreams2.daejin.ac.kr/sugang/new/sugang_wlsn0417_1.jsp?ic_kwa=B41005&ic_kwa_1=AA0242", "name": "경영학과 전공" }
+]
+```
+
+---
+
+## 🖥 5. 서버 백그라운드 데몬 관리 (Systemd)
+
+웹 옵저버는 라즈베리파이 백그라운드 서비스(`daejin-observer.service`)로 24시간 풀가동됩니다.
+
+```bash
+# 서비스 상태 확인
+sudo systemctl status daejin-observer.service
+
+# 서비스 재시작 (디스크 캐시 기반 0초 복구)
+sudo systemctl restart daejin-observer.service
+
+# 실시간 로그 모니터링
+journalctl -u daejin-observer.service -f
+```
+
+---
+
+## 📡 6. REST & SSE API 엔드포인트
+
+| 엔드포인트 | 메서드 | 설명 |
+|---|---|---|
+| `GET /` | HTML | 반응형 실시간 옵저버 웹 대시보드 |
+| `GET /api/stream` | SSE | 실시간 잔여석 변동 및 취소표 스트림 (`EventSource`) |
+| `GET /api/data` | JSON | 전체 510개 강좌 및 실시간 상태 스냅샷 (Zero-Copy 메모리 캐시) |
+| `POST /api/reload_targets` | JSON | `targets.json` 모니터링 대상 즉시 리로드 |
