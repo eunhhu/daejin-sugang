@@ -6,6 +6,7 @@
   "headless": true,
   "discord_bot_token": "",
   "discord_channel_id": "",
+  "hunter_poll_interval": 1.5,
   "courses": [
     {
       "name": "자바프로그래밍언어",
@@ -14,40 +15,22 @@
       "fallback_bun": []
     },
     {
-      "name": "정보보호개론",
-      "code": "577503",
-      "bun": "01",
-      "fallback_bun": []
-    },
-    {
-      "name": "SW프로그래밍Ⅱ",
-      "code": "577504",
-      "bun": "01",
-      "fallback_bun": []
-    },
-    {
       "name": "대순사상과상생윤리",
       "code": "927430",
       "bun": "15",
       "fallback_bun": ["19", "18", "21", "22", "03"]
+    }
+  ],
+  "hunter_targets": [
+    {
+      "name": "대순사상과상생윤리 (03분반 꿀교수)",
+      "code": "927430",
+      "bun": "03"
     },
     {
-      "name": "영어읽기와토론",
+      "name": "영어읽기와토론 (12분반)",
       "code": "927284",
-      "bun": "14",
-      "fallback_bun": ["07", "13", "23", "01", "12"]
-    },
-    {
-      "name": "생성형AI기초와활용",
-      "code": "922535",
-      "bun": "02",
-      "fallback_bun": ["01"]
-    },
-    {
-      "name": "AI시대의콘텐츠크리에이션",
-      "code": "922616",
-      "bun": "01",
-      "fallback_bun": ["02"]
+      "bun": "12"
     }
   ]
 }
