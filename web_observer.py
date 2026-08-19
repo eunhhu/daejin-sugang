@@ -26,8 +26,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 import uvicorn
+from push_manager import push_mgr
 
 logging.basicConfig(
     level=logging.INFO,
@@ -330,22 +331,28 @@ async def broadcast_worker():
     while crawler_running:
         try:
             diff = await asyncio.to_thread(crawler.scrape_cycle)
-            if subscribers and diff:
-                payload = {
-                    "type": "delta",
-                    "changes": diff.get("changes", []),
-                    "events": diff.get("new_events", []),
-                    "stats": diff.get("stats", {})
-                }
-                msg = f"event: update\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                dead_subs = set()
-                for q in list(subscribers):
-                    try:
-                        q.put_nowait(msg)
-                    except asyncio.QueueFull:
-                        dead_subs.add(q)
-                for q in dead_subs:
-                    subscribers.discard(q)
+            if diff:
+                new_events = diff.get("new_events", [])
+                if new_events:
+                    for ev in new_events:
+                        asyncio.create_task(asyncio.to_thread(push_mgr.broadcast_vacancy_event, ev))
+
+                if subscribers:
+                    payload = {
+                        "type": "delta",
+                        "changes": diff.get("changes", []),
+                        "events": new_events,
+                        "stats": diff.get("stats", {})
+                    }
+                    msg = f"event: update\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    dead_subs = set()
+                    for q in list(subscribers):
+                        try:
+                            q.put_nowait(msg)
+                        except asyncio.QueueFull:
+                            dead_subs.add(q)
+                    for q in dead_subs:
+                        subscribers.discard(q)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -373,6 +380,73 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Daejin Sugang Observer", lifespan=lifespan)
+
+
+@app.get("/manifest.json")
+async def get_manifest():
+    return FileResponse(
+        os.path.join(BASE_DIR, "manifest.json"),
+        media_type="application/manifest+json"
+    )
+
+
+@app.get("/sw.js")
+async def get_service_worker():
+    return FileResponse(
+        os.path.join(BASE_DIR, "sw.js"),
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/"}
+    )
+
+
+@app.get("/api/push/public_key")
+async def get_push_public_key():
+    return {"public_key": push_mgr.get_public_key()}
+
+
+@app.post("/api/push/subscribe")
+async def subscribe_push_api(request: Request):
+    try:
+        data = await request.json()
+        sub = data.get("subscription")
+        starred = data.get("starred_courses", [])
+        mode = data.get("alert_mode", "ALL_OPEN")
+        success = push_mgr.add_subscription(sub, starred, mode)
+        return {"status": "ok" if success else "error"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/push/unsubscribe")
+async def unsubscribe_push_api(request: Request):
+    try:
+        data = await request.json()
+        endpoint = data.get("endpoint")
+        if endpoint:
+            push_mgr.remove_subscription(endpoint)
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/push/test")
+async def test_push_api(request: Request):
+    try:
+        data = await request.json()
+        sub = data.get("subscription")
+        if not sub:
+            return {"status": "error", "message": "No subscription provided"}
+        payload = {
+            "title": "🔔 [대진대 옵저버] 백그라운드 푸시 연동 완료!",
+            "body": "브라우저나 화면을 닫아도 수강신청 빈자리가 생기면 실시간 푸시가 도착합니다.",
+            "icon": "https://www.daejin.ac.kr/favicon.ico",
+            "badge": "https://www.daejin.ac.kr/favicon.ico",
+            "url": "https://daejin.qucord.com"
+        }
+        success, msg = push_mgr.send_push(sub, payload)
+        return {"status": "ok" if success else "error", "message": msg}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @app.head("/api/data")
@@ -438,6 +512,11 @@ HTML_CONTENT = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>대진대 수강신청 실시간 빈자리 옵저버</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="대진 옵저버">
+  <link rel="apple-touch-icon" href="https://www.daejin.ac.kr/site/daejin/images/common/logo.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script>
@@ -491,10 +570,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         </button>
 
         <!-- Web Push Notification Request -->
-        <button id="pushNotifBtn" onclick="requestPushPermission()" 
+        <button id="pushNotifBtn" onclick="toggleWebPush()" 
                 class="px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
           <i id="pushIcon" class="fa-solid fa-bell"></i>
-          <span id="pushLabel">브라우저 푸시 허용</span>
+          <span id="pushLabel">백그라운드 푸시 켜기</span>
         </button>
 
         <!-- Alert Scope Selector -->
@@ -518,6 +597,43 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
   </header>
+
+  <!-- iOS Safari PWA Guide Modal -->
+  <div id="iosModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-base font-bold text-zinc-100 flex items-center gap-2">
+          <i class="fa-brands fa-apple text-emerald-400"></i> 아이폰 백그라운드 푸시 설정
+        </h3>
+        <button onclick="closeIosModal()" class="text-zinc-400 hover:text-zinc-200">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+      <p class="text-xs text-zinc-300 leading-relaxed">
+        iOS 사파리는 보안 정책상 <strong class="text-emerald-400">'홈 화면에 추가(PWA)'</strong>된 상태에서만 브라우저가 꺼져 있을 때 백그라운드 푸시 알림을 수신할 수 있습니다.
+      </p>
+      <div class="space-y-3 bg-zinc-950/80 p-4 rounded-xl border border-zinc-800 text-xs">
+        <div class="flex items-start gap-2.5">
+          <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center text-[11px] shrink-0">1</span>
+          <span>사파리 하단 메뉴바의 <strong>[공유]</strong> 아이콘( <i class="fa-solid fa-arrow-up-from-bracket text-blue-400"></i> )을 누릅니다.</span>
+        </div>
+        <div class="flex items-start gap-2.5">
+          <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center text-[11px] shrink-0">2</span>
+          <span>아래로 스크롤하여 <strong>[홈 화면에 추가]</strong>( <i class="fa-regular fa-square-plus text-emerald-400"></i> )를 선택합니다.</span>
+        </div>
+        <div class="flex items-start gap-2.5">
+          <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center text-[11px] shrink-0">3</span>
+          <span>홈 화면에 생성된 <strong>'대진 옵저버'</strong> 앱 아이콘으로 접속한 뒤 <strong>[🔔 백그라운드 푸시 켜기]</strong>를 누르면 완료!</span>
+        </div>
+      </div>
+      <div class="text-[11px] text-zinc-400">
+        💡 안드로이드 및 PC 크롬/엣지/파폭/웨일은 홈 화면 추가 없이 즉시 백그라운드 푸시가 수신됩니다.
+      </div>
+      <button onclick="closeIosModal()" class="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-bold text-xs text-white transition">
+        확인했습니다
+      </button>
+    </div>
+  </div>
 
   <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
@@ -765,11 +881,186 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
+    // Web Push (VAPID / Service Worker) State
+    let isPushSubscribed = false;
+    let pushSubscription = null;
+    let swRegistration = null;
+
+    function isIos() {
+      return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+    }
+
+    function isStandalone() {
+      return (window.navigator.standalone === true) || window.matchMedia('(display-mode: standalone)').matches;
+    }
+
+    function showIosModal() {
+      const m = document.getElementById('iosModal');
+      if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+    }
+
+    function closeIosModal() {
+      const m = document.getElementById('iosModal');
+      if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    }
+
+    function urlB64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = window.atob(base64);
+      const outputArray = new Uint8Array(rawData.length);
+      for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+      }
+      return outputArray;
+    }
+
+    async function initServiceWorker() {
+      if (!('serviceWorker' in navigator)) return;
+
+      try {
+        swRegistration = await navigator.serviceWorker.register('/sw.js');
+        if ('PushManager' in window) {
+          pushSubscription = await swRegistration.pushManager.getSubscription();
+          isPushSubscribed = !!pushSubscription;
+          updatePushBtnUI();
+        }
+      } catch (err) {
+        console.warn('Service Worker registration error:', err);
+      }
+    }
+
+    function updatePushBtnUI() {
+      const btn = document.getElementById('pushNotifBtn');
+      const icon = document.getElementById('pushIcon');
+      const label = document.getElementById('pushLabel');
+      if (!btn || !icon || !label) return;
+
+      if (isIos() && !isStandalone() && !('PushManager' in window)) {
+        icon.className = "fa-brands fa-apple text-amber-400";
+        label.innerText = "아이폰 푸시 설정";
+        return;
+      }
+
+      if (isPushSubscribed) {
+        btn.className = "px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 transition flex items-center gap-1.5 text-emerald-300 font-medium";
+        icon.className = "fa-solid fa-bell text-emerald-400";
+        label.innerText = "백그라운드 푸시 켜짐";
+      } else {
+        btn.className = "px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300";
+        icon.className = "fa-solid fa-bell-slash text-zinc-400";
+        label.innerText = "백그라운드 푸시 켜기";
+      }
+    }
+
+    async function syncPushPreferences() {
+      if (!pushSubscription) return;
+      try {
+        await fetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subscription: pushSubscription,
+            starred_courses: Array.from(starredKeys),
+            alert_mode: alertMode
+          })
+        });
+      } catch (e) {
+        console.warn("Failed to sync push preferences:", e);
+      }
+    }
+
+    async function toggleWebPush() {
+      if (isIos() && !isStandalone() && !('PushManager' in window)) {
+        showIosModal();
+        return;
+      }
+
+      if (!('PushManager' in window) || !('serviceWorker' in navigator)) {
+        if (isIos() && !isStandalone()) {
+          showIosModal();
+          return;
+        }
+        alert('이 브라우저는 웹 푸시 API를 지원하지 않습니다.');
+        return;
+      }
+
+      if (!swRegistration) {
+        await initServiceWorker();
+      }
+
+      if (isPushSubscribed) {
+        // Unsubscribe
+        try {
+          if (pushSubscription) {
+            await fetch('/api/push/unsubscribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ endpoint: pushSubscription.endpoint })
+            });
+            await pushSubscription.unsubscribe();
+          }
+          pushSubscription = null;
+          isPushSubscribed = false;
+          updatePushBtnUI();
+        } catch (e) {
+          console.error('Failed to unsubscribe:', e);
+        }
+      } else {
+        // Subscribe
+        try {
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') {
+            alert('알림 권한이 허용되지 않았습니다. 브라우저 설정에서 알림 권한을 허용해주세요.');
+            return;
+          }
+
+          const keyRes = await fetch('/api/push/public_key');
+          const { public_key } = await keyRes.json();
+
+          const sub = await swRegistration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlB64ToUint8Array(public_key)
+          });
+
+          pushSubscription = sub;
+          isPushSubscribed = true;
+
+          // Register on server
+          await fetch('/api/push/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              subscription: sub,
+              starred_courses: Array.from(starredKeys),
+              alert_mode: alertMode
+            })
+          });
+
+          updatePushBtnUI();
+
+          // Send immediate test verification push
+          await fetch('/api/push/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subscription: sub })
+          });
+        } catch (err) {
+          console.error('Push subscription failed:', err);
+          if (isIos() && !isStandalone()) {
+            showIosModal();
+          } else {
+            alert('푸시 알림 등록에 실패했습니다: ' + err.message);
+          }
+        }
+      }
+    }
+
     function initSettings() {
       const modeSelect = document.getElementById('alertModeSelect');
       if (modeSelect) modeSelect.value = alertMode;
       updateStarredCountUI();
-      checkPushPermissionUI();
+      initServiceWorker();
 
       // Instant 0ms cache hydration
       fetch('/api/data').then(r => r.json()).then(data => {
@@ -788,45 +1079,10 @@ HTML_CONTENT = """<!DOCTYPE html>
       }).catch(() => {});
     }
 
-    function checkPushPermissionUI() {
-      const btn = document.getElementById('pushNotifBtn');
-      const icon = document.getElementById('pushIcon');
-      const label = document.getElementById('pushLabel');
-      if (!("Notification" in window)) {
-        btn.style.display = "none";
-        return;
-      }
-      if (Notification.permission === "granted") {
-        icon.className = "fa-solid fa-bell text-emerald-400";
-        label.innerText = "푸시 켜짐";
-      } else if (Notification.permission === "denied") {
-        icon.className = "fa-solid fa-bell-slash text-rose-400";
-        label.innerText = "푸시 차단됨";
-      } else {
-        icon.className = "fa-solid fa-bell text-zinc-400";
-        label.innerText = "푸시 알림 허용";
-      }
-    }
-
-    function requestPushPermission() {
-      if (!("Notification" in window)) {
-        alert("이 브라우저는 웹 푸시 알림을 지원하지 않습니다.");
-        return;
-      }
-      Notification.requestPermission().then(permission => {
-        checkPushPermissionUI();
-        if (permission === "granted") {
-          new Notification("🔔 대진대 수강신청 옵저버 알림 활성화!", {
-            body: "구독한 과목에 빈자리가 생기면 실시간으로 데스크톱 알림을 보내드립니다.",
-            icon: "https://www.daejin.ac.kr/favicon.ico"
-          });
-        }
-      });
-    }
-
     function changeAlertMode() {
       alertMode = document.getElementById('alertModeSelect').value;
       localStorage.setItem('daejin_alert_mode', alertMode);
+      syncPushPreferences();
     }
 
     function toggleStarredOnly() {
@@ -844,6 +1100,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       localStorage.setItem('daejin_starred_courses', JSON.stringify(Array.from(starredKeys)));
       updateStarredCountUI();
       renderCourses();
+      syncPushPreferences();
     }
 
     function updateStarredCountUI() {
