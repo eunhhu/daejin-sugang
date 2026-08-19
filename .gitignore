@@ -1,0 +1,9 @@
+config.json
+logs/
+screenshots/
+*.log
+*.har
+*.png
+__pycache__/
+.env
+.venv
