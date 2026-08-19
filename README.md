@@ -254,3 +254,22 @@ journalctl -u daejin-observer.service -f
 | `GET /api/stream` | SSE | 실시간 잔여석 변동 및 취소표 스트림 (`EventSource`) |
 | `GET /api/data` | JSON | 전체 510개 강좌 및 실시간 상태 스냅샷 (Zero-Copy 메모리 캐시) |
 | `POST /api/reload_targets` | JSON | `targets.json` 모니터링 대상 즉시 리로드 |
+
+---
+
+## 🤖 7. CI/CD 자동 빌드 & 릴리즈 파이프라인 (GitHub Actions)
+
+로컬 머신에서 바이너리를 직접 빌드/배포하지 않고, GitHub Actions CI/CD를 통해 버전 태그 푸시 시 자동으로 크로스플랫폼 단일 실행 파일이 빌드 및 릴리즈됩니다.
+
+### 🚀 새 버전 릴리즈 방법
+```bash
+# 1. 버전 태그 생성 (예: v1.0.1)
+git tag v1.0.1
+
+# 2. 태그 푸시 -> GitHub Actions가 자동으로 Windows .exe 빌드 후 Releases에 업로드
+git push origin v1.0.1
+```
+
+- **워크플로우 파일**: `.github/workflows/release.yml`
+- **동작**: `windows-latest` 환경에서 PyInstaller로 독립 실행 파일(`DaejinSugangSuite-Windows-x64.exe`)을 패키징하여 GitHub Releases에 자동 등록.
+
