@@ -17,11 +17,16 @@ import os
 import sys
 import time
 import json
+import re
 import random
 import logging
 import datetime
 import requests
-from bs4 import BeautifulSoup
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,13 +107,25 @@ class DaejinAtomicSwapper:
         """Passively checks remaining seats for target course without touching existing courses."""
         try:
             r = self.session.get(QUERY_URL, timeout=4)
-            soup = BeautifulSoup(r.content.decode("euc-kr", "replace"), "html.parser")
-            for tr in soup.find_all("tr"):
-                row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                if len(row) > 8 and self.target_course["code"] in row[1]:
-                    rem_str = row[8]
-                    if rem_str.isdigit():
-                        return int(rem_str), row[7] # rem, total_enrolled
+            html = r.content.decode("euc-kr", "replace")
+            
+            # Fast regex table row search
+            if BeautifulSoup:
+                soup = BeautifulSoup(html, "html.parser")
+                for tr in soup.find_all("tr"):
+                    row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                    if len(row) > 8 and self.target_course["code"] in row[1]:
+                        rem_str = row[8]
+                        if rem_str.isdigit():
+                            return int(rem_str), row[7]
+            else:
+                # Pure regex fallback
+                pattern = rf"{self.target_course['code']}.*?(\d+)\s*</td>\s*<td[^>]*>\s*(\d+)\s*</td>"
+                m = re.search(pattern, html, re.DOTALL)
+                if m:
+                    enrolled = m.group(1)
+                    rem = int(m.group(2))
+                    return rem, enrolled
             return 0, "?"
         except Exception as e:
             logger.warning(f"Seat query error: {e}")
