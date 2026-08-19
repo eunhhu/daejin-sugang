@@ -259,17 +259,22 @@ journalctl -u daejin-observer.service -f
 
 ## 🤖 7. CI/CD 자동 빌드 & 릴리즈 파이프라인 (GitHub Actions)
 
-로컬 머신에서 바이너리를 직접 빌드/배포하지 않고, GitHub Actions CI/CD를 통해 버전 태그 푸시 시 자동으로 크로스플랫폼 단일 실행 파일이 빌드 및 릴리즈됩니다.
+로컬 머신에서 바이너리를 직접 빌드/배포하지 않고, GitHub Actions CI/CD를 통해 버전 태그 푸시 시 자동으로 Windows 및 macOS(Apple Silicon) 단일 실행 파일이 빌드 및 릴리즈됩니다.
+
+### 📦 지원 OS 및 산출물
+- **Windows (x64)**: `DaejinSugangSuite-Windows-x64.exe` (독립 실행 파일)
+- **macOS (Apple Silicon M1/M2/M3/M4)**: `DaejinSugangSuite-macOS-AppleSilicon.zip` (`.app` 번들)
 
 ### 🚀 새 버전 릴리즈 방법
 ```bash
 # 1. 버전 태그 생성 (예: v1.0.1)
 git tag v1.0.1
 
-# 2. 태그 푸시 -> GitHub Actions가 자동으로 Windows .exe 빌드 후 Releases에 업로드
+# 2. 태그 푸시 -> GitHub Actions가 자동으로 Windows & macOS 빌드 후 Releases에 업로드
 git push origin v1.0.1
 ```
 
 - **워크플로우 파일**: `.github/workflows/release.yml`
-- **동작**: `windows-latest` 환경에서 PyInstaller로 독립 실행 파일(`DaejinSugangSuite-Windows-x64.exe`)을 패키징하여 GitHub Releases에 자동 등록.
+- **동작**: `windows-latest` 및 `macos-latest` 환경에서 각각 독립 실행 앱을 패키징하여 GitHub Releases에 자동 등록.
+
 
