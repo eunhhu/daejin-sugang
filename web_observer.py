@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Daejin University Real-time Course Vacancy Observer (High-Performance SSE & Zero-Downtime Hot-Reload)
-===================================================================================================
+Daejin University Real-time Course Vacancy Observer (High-Performance SSE & Web Push Suite)
+===========================================================================================
 - Backwards compatible with legacy polling (/api/data)
 - High-concurrency Server-Sent Events (SSE) streaming (/api/stream)
-- Zero-Downtime State Persistence: loads last cache on startup instantly
-- Dynamic Hot-Reload of monitoring targets (targets.json) without process restarts
-- Multi-threaded parallel crawler for Major (스마트융합보안, 경영학과 등), 교필, 교선 1~6영역
+- Course Watchlist / Star Subscription System (⭐ 구독 과목만 알림)
+- Native Browser Web Push Notification API
+- Zero-Downtime State Persistence & Hot-Reload (targets.json)
 """
 
 import os
@@ -80,7 +80,7 @@ def load_state_cache():
                     "events": event_history[:20],
                     "courses": list(course_db.values())
                 }, ensure_ascii=False).encode("utf-8")
-                logger.info(f"💾 Restored state cache: {len(course_db)} courses ({open_cnt} open), {len(event_history)} events.")
+                logger.info(f"💾 Restored state cache: {len(course_db)} courses ({open_cnt} open).")
         except Exception as e:
             logger.warning(f"Failed to load state cache: {e}")
 
@@ -97,7 +97,6 @@ def save_state_cache():
         logger.debug(f"Failed to save state cache: {e}")
 
 
-# Load cache immediately at module load time so there is ZERO blank screen on startup
 load_state_cache()
 
 
@@ -131,7 +130,7 @@ class CourseCrawler:
                     with open(TARGETS_PATH, "r", encoding="utf-8") as f:
                         self.scrape_targets = json.load(f)
                     self.targets_mtime = mtime
-                    logger.info(f"🎯 Loaded {len(self.scrape_targets)} scrape targets from targets.json")
+                    logger.info(f"🎯 Loaded {len(self.scrape_targets)} targets from targets.json")
             except Exception as e:
                 logger.error(f"Error loading targets: {e}")
 
@@ -263,8 +262,11 @@ class CourseCrawler:
                             "type": "VACANCY_OPEN",
                             "code": c["code"],
                             "bun": c["bun"],
+                            "full_code": c["full_code"],
                             "name": c["name"],
                             "seats": c["seats"],
+                            "prof": c.get("prof", ""),
+                            "time_str": c.get("time", ""),
                             "msg": event_msg
                         }
                         new_events.insert(0, ev)
@@ -276,8 +278,11 @@ class CourseCrawler:
                             "type": "VACANCY_FILLED",
                             "code": c["code"],
                             "bun": c["bun"],
+                            "full_code": c["full_code"],
                             "name": c["name"],
                             "seats": 0,
+                            "prof": c.get("prof", ""),
+                            "time_str": c.get("time", ""),
                             "msg": f"⏳ [마감] {c['name']} ({c['code']}-{c['bun']}) 잔여석 소진 (마감)"
                         }
                         new_events.insert(0, ev)
@@ -370,10 +375,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Daejin Sugang Observer", lifespan=lifespan)
 
 
-# ==============================================================================
-# REST API (Backwards-compatible legacy polling & hot management)
-# ==============================================================================
-
 @app.head("/api/data")
 @app.get("/api/data")
 async def get_data():
@@ -392,16 +393,11 @@ async def reload_targets_api():
     return {"status": "ok", "targets_count": len(crawler.scrape_targets)}
 
 
-# ==============================================================================
-# SSE Real-time Push Endpoint
-# ==============================================================================
-
 @app.get("/api/stream")
 async def sse_stream(request: Request):
     q = asyncio.Queue(maxsize=30)
     subscribers.add(q)
 
-    # Initial snapshot
     init_data = json.dumps({
         "type": "init",
         "courses": list(course_db.values()),
@@ -436,10 +432,6 @@ async def sse_stream(request: Request):
     )
 
 
-# ==============================================================================
-# Web Dashboard HTML
-# ==============================================================================
-
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="ko" class="dark">
 <head>
@@ -473,7 +465,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
   <!-- Header -->
   <header class="border-b border-zinc-800 bg-zinc-900/80 backdrop-blur sticky top-0 z-50">
-    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex items-center gap-3">
         <div class="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
           <i class="fa-solid fa-radar text-lg"></i>
@@ -485,21 +477,37 @@ HTML_CONTENT = """<!DOCTYPE html>
               <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot"></span> <span id="connLabel">SSE 연결 중</span>
             </span>
           </h1>
-          <p class="text-xs text-zinc-400">전공(스마트융합보안, 경영학과) 및 교양 전체 영역 실시간 취소표 감지</p>
+          <p class="text-xs text-zinc-400">전공(스마트융합보안, 경영학과) 및 교양 전 영역 실시간 취소표 감지</p>
         </div>
       </div>
       
-      <div class="flex items-center gap-3 text-xs">
-        <div class="hidden sm:flex items-center gap-2 bg-zinc-800/60 px-3 py-1.5 rounded-lg border border-zinc-700/50">
-          <i class="fa-solid fa-server text-zinc-400"></i>
-          <span class="text-zinc-400">서버 갱신:</span>
-          <span id="lastUpdated" class="font-mono text-zinc-200">-</span>
-          <span class="text-zinc-500">|</span>
-          <span id="scrapeLatency" class="font-mono text-blue-400">-ms</span>
-        </div>
-        <button id="soundToggle" onclick="toggleSound()" class="px-3 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
-          <i id="soundIcon" class="fa-solid fa-bell"></i>
-          <span id="soundLabel">알림음 ON</span>
+      <!-- Notification Controls Bar -->
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <!-- Subscribed Filter Quick Button -->
+        <button id="starredQuickBtn" onclick="toggleStarredOnly()" 
+                class="px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
+          <i class="fa-solid fa-star text-amber-400"></i>
+          <span id="starredCountLabel">⭐ 구독 0개</span>
+        </button>
+
+        <!-- Web Push Notification Request -->
+        <button id="pushNotifBtn" onclick="requestPushPermission()" 
+                class="px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
+          <i id="pushIcon" class="fa-solid fa-bell"></i>
+          <span id="pushLabel">브라우저 푸시 허용</span>
+        </button>
+
+        <!-- Alert Scope Selector -->
+        <select id="alertModeSelect" onchange="changeAlertMode()" 
+                class="bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-blue-500 font-medium">
+          <option value="STARRED_ONLY">⭐ 구독 과목만 알림</option>
+          <option value="ALL_OPEN">🔥 전체 빈자리 알림</option>
+          <option value="MUTED">🔕 알림 끄기</option>
+        </select>
+
+        <button id="soundToggle" onclick="toggleSound()" class="px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
+          <i id="soundIcon" class="fa-solid fa-volume-high text-emerald-400"></i>
+          <span id="soundLabel">소리 ON</span>
         </button>
       </div>
     </div>
@@ -528,9 +536,9 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div class="text-[11px] text-zinc-500 mt-1">실시간 감지된 변동 건수</div>
       </div>
       <div class="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl">
-        <div class="text-xs text-zinc-400 font-medium mb-1">모니터링 모드</div>
-        <div id="statStatus" class="text-lg font-bold text-blue-400 truncate">초고속 스트림</div>
-        <div class="text-[11px] text-zinc-500 mt-1">실시간 즉각 푸시(SSE)</div>
+        <div class="text-xs text-zinc-400 font-medium mb-1">내 관심 과목</div>
+        <div id="statStarred" class="text-2xl font-bold text-amber-400 font-mono">0</div>
+        <div class="text-[11px] text-zinc-500 mt-1">⭐ 알림 타겟 구독 과목</div>
       </div>
     </div>
 
@@ -589,11 +597,19 @@ HTML_CONTENT = """<!DOCTYPE html>
           <option value="ENROLLED_ASC">👥 신청자 적은 순</option>
         </select>
 
-        <!-- Toggle Open Only -->
-        <label class="flex items-center gap-2 cursor-pointer bg-zinc-950 border border-zinc-800 px-4 py-2 rounded-xl text-sm font-medium hover:bg-zinc-800/50 transition select-none">
+        <!-- Starred Only Toggle -->
+        <label class="flex items-center gap-2 cursor-pointer bg-zinc-950 border border-zinc-800 px-3.5 py-2 rounded-xl text-sm font-medium hover:bg-zinc-800/50 transition select-none">
+          <input id="starredOnlyToggle" type="checkbox" onchange="renderCourses()" class="w-4 h-4 rounded text-amber-400 focus:ring-0 bg-zinc-900 border-zinc-700">
+          <span class="text-amber-400 flex items-center gap-1">
+            <i class="fa-solid fa-star"></i> 구독 과목만
+          </span>
+        </label>
+
+        <!-- Open Only Toggle -->
+        <label class="flex items-center gap-2 cursor-pointer bg-zinc-950 border border-zinc-800 px-3.5 py-2 rounded-xl text-sm font-medium hover:bg-zinc-800/50 transition select-none">
           <input id="openOnlyToggle" type="checkbox" onchange="renderCourses()" class="w-4 h-4 rounded text-emerald-500 focus:ring-0 bg-zinc-900 border-zinc-700">
-          <span class="text-emerald-400 flex items-center gap-1.5">
-            <i class="fa-solid fa-sparkles"></i> 빈자리만 보기
+          <span class="text-emerald-400 flex items-center gap-1">
+            <i class="fa-solid fa-sparkles"></i> 빈자리만
           </span>
         </label>
       </div>
@@ -603,13 +619,14 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
       <div class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between text-xs text-zinc-400">
         <span id="filteredCount">0개 강좌 표시 중</span>
-        <span>학수번호 클릭 시 클립보드에 자동 복사</span>
+        <span>⭐ 클릭하여 과목 알림 구독 / 학수번호 클릭하여 복사</span>
       </div>
 
       <div class="overflow-x-auto">
         <table class="w-full text-left text-sm">
           <thead class="bg-zinc-950/70 text-zinc-400 text-xs uppercase border-b border-zinc-800">
             <tr>
+              <th class="py-3 px-3 text-center w-10">⭐</th>
               <th onclick="setSort('seats')" class="py-3 px-4 cursor-pointer select-none hover:text-white transition">
                 상태 / 여석 <span id="sort_icon_seats">▼</span>
               </th>
@@ -636,7 +653,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           </thead>
           <tbody id="courseTableBody" class="divide-y divide-zinc-800/60 font-sans">
             <tr>
-              <td colspan="8" class="text-center py-8 text-zinc-500">데이터를 불러오는 중입니다...</td>
+              <td colspan="9" class="text-center py-8 text-zinc-500">데이터 스트림에 연결하는 중입니다...</td>
             </tr>
           </tbody>
         </table>
@@ -654,19 +671,139 @@ HTML_CONTENT = """<!DOCTYPE html>
     let knownOpenKeys = new Set();
     let isInitialized = false;
     let eventSource = null;
+    let currentSort = 'SEATS_DESC';
+
+    // Watchlist / Subscriptions
+    let starredKeys = new Set(JSON.parse(localStorage.getItem('daejin_starred_courses') || '[]'));
+    let alertMode = localStorage.getItem('daejin_alert_mode') || 'STARRED_ONLY';
+
+    function initSettings() {
+      const modeSelect = document.getElementById('alertModeSelect');
+      if (modeSelect) modeSelect.value = alertMode;
+      updateStarredCountUI();
+      checkPushPermissionUI();
+
+      // Instant 0ms cache hydration
+      fetch('/api/data').then(r => r.json()).then(data => {
+        if (!isInitialized && data && data.courses) {
+          courseMap.clear();
+          data.courses.forEach(c => {
+            courseMap.set(c.full_code, c);
+            if (c.seats > 0) knownOpenKeys.add(c.full_code);
+          });
+          eventsList = data.events || [];
+          updateStatsUI(data.stats);
+          renderEvents(eventsList);
+          renderCourses();
+          isInitialized = true;
+        }
+      }).catch(() => {});
+    }
+
+    function checkPushPermissionUI() {
+      const btn = document.getElementById('pushNotifBtn');
+      const icon = document.getElementById('pushIcon');
+      const label = document.getElementById('pushLabel');
+      if (!("Notification" in window)) {
+        btn.style.display = "none";
+        return;
+      }
+      if (Notification.permission === "granted") {
+        icon.className = "fa-solid fa-bell text-emerald-400";
+        label.innerText = "푸시 켜짐";
+      } else if (Notification.permission === "denied") {
+        icon.className = "fa-solid fa-bell-slash text-rose-400";
+        label.innerText = "푸시 차단됨";
+      } else {
+        icon.className = "fa-solid fa-bell text-zinc-400";
+        label.innerText = "푸시 알림 허용";
+      }
+    }
+
+    function requestPushPermission() {
+      if (!("Notification" in window)) {
+        alert("이 브라우저는 웹 푸시 알림을 지원하지 않습니다.");
+        return;
+      }
+      Notification.requestPermission().then(permission => {
+        checkPushPermissionUI();
+        if (permission === "granted") {
+          new Notification("🔔 대진대 수강신청 옵저버 알림 활성화!", {
+            body: "구독한 과목에 빈자리가 생기면 실시간으로 데스크톱 알림을 보내드립니다.",
+            icon: "https://www.daejin.ac.kr/favicon.ico"
+          });
+        }
+      });
+    }
+
+    function changeAlertMode() {
+      alertMode = document.getElementById('alertModeSelect').value;
+      localStorage.setItem('daejin_alert_mode', alertMode);
+    }
+
+    function toggleStarredOnly() {
+      const chk = document.getElementById('starredOnlyToggle');
+      chk.checked = !chk.checked;
+      renderCourses();
+    }
+
+    function toggleSubscription(full_code) {
+      if (starredKeys.has(full_code)) {
+        starredKeys.delete(full_code);
+      } else {
+        starredKeys.add(full_code);
+      }
+      localStorage.setItem('daejin_starred_courses', JSON.stringify(Array.from(starredKeys)));
+      updateStarredCountUI();
+      renderCourses();
+    }
+
+    function updateStarredCountUI() {
+      const cnt = starredKeys.size;
+      document.getElementById('statStarred').innerText = cnt;
+      document.getElementById('starredCountLabel').innerText = `⭐ 구독 ${cnt}개`;
+    }
 
     function toggleSound() {
       soundEnabled = !soundEnabled;
-      document.getElementById('soundIcon').className = soundEnabled ? 'fa-solid fa-bell' : 'fa-solid fa-bell-slash';
-      document.getElementById('soundLabel').innerText = soundEnabled ? '알림음 ON' : '알림음 OFF';
+      document.getElementById('soundIcon').className = soundEnabled ? 'fa-solid fa-volume-high text-emerald-400' : 'fa-solid fa-volume-xmark text-zinc-500';
+      document.getElementById('soundLabel').innerText = soundEnabled ? '소리 ON' : '소리 OFF';
     }
 
     function playBeep() {
-      if (!soundEnabled) return;
+      if (!soundEnabled || alertMode === 'MUTED') return;
       const audio = document.getElementById('alertAudio');
       if (audio) {
         audio.currentTime = 0;
         audio.play().catch(() => {});
+      }
+    }
+
+    function fireWebPush(c) {
+      if (!("Notification" in window) || Notification.permission !== "granted" || alertMode === 'MUTED') return;
+      try {
+        const notif = new Notification(`🔥 [빈자리 발생!] ${c.name} (${c.code}-${c.bun})`, {
+          body: `현재 ${c.seats}자리 발생! 교수: ${c.prof || '-'} | 시간: ${c.time || '-'} (클릭하여 복사)`,
+          icon: "https://www.daejin.ac.kr/favicon.ico",
+          tag: `vacancy-${c.full_code}`,
+          renotify: true
+        });
+        notif.onclick = function() {
+          window.focus();
+          navigator.clipboard.writeText(`${c.code}${c.bun}`);
+          notif.close();
+        };
+      } catch (err) {
+        console.warn("Notification trigger error:", err);
+      }
+    }
+
+    function triggerAlertForCourse(c) {
+      const isStarred = starredKeys.has(c.full_code);
+      const shouldAlert = (alertMode === 'ALL_OPEN') || (alertMode === 'STARRED_ONLY' && isStarred);
+      if (shouldAlert) {
+        playBeep();
+        fireWebPush(c);
       }
     }
 
@@ -680,12 +817,16 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function updateStatsUI(s) {
       if (!s) return;
-      document.getElementById('statTotal').innerText = s.total_courses || 0;
-      document.getElementById('statOpen').innerText = s.open_courses || 0;
-      document.getElementById('statEvents').innerText = s.events_count || 0;
-      document.getElementById('statStatus').innerText = s.status || 'Live';
-      document.getElementById('lastUpdated').innerText = s.last_scraped_at || '-';
-      document.getElementById('scrapeLatency').innerText = (s.scrape_latency_ms || 0) + 'ms';
+      const setTxt = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.innerText = val;
+      };
+      setTxt('statTotal', s.total_courses || 0);
+      setTxt('statOpen', s.open_courses || 0);
+      setTxt('statEvents', s.events_count || 0);
+      setTxt('statStatus', s.status || 'Live');
+      setTxt('lastUpdated', s.last_scraped_at || '-');
+      setTxt('scrapeLatency', (s.scrape_latency_ms || 0) + 'ms');
     }
 
     function renderEvents(events) {
@@ -697,11 +838,13 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       container.innerHTML = events.slice(0, 20).map(e => {
         const isOpen = e.type === 'VACANCY_OPEN';
+        const isStarred = starredKeys.has(e.full_code || `${e.code}${e.bun}`);
         return `
-          <div class="flex items-center justify-between py-1 px-2.5 rounded-lg ${isOpen ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300' : 'bg-zinc-800/40 text-zinc-400'}">
+          <div class="flex items-center justify-between py-1 px-2.5 rounded-lg ${isStarred ? 'bg-amber-500/10 border border-amber-500/30 text-amber-300' : (isOpen ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300' : 'bg-zinc-800/40 text-zinc-400')}">
             <div class="flex items-center gap-2 truncate">
               <span class="text-zinc-500 font-mono text-[10px]">[${e.time}]</span>
-              <span class="font-bold ${isOpen ? 'text-emerald-400' : 'text-zinc-400'}">${e.name} (${e.code}-${e.bun})</span>
+              ${isStarred ? '<span class="text-amber-400">⭐</span>' : ''}
+              <span class="font-bold ${isOpen ? (isStarred ? 'text-amber-300' : 'text-emerald-400') : 'text-zinc-400'}">${e.name} (${e.code}-${e.bun})</span>
               <span>${isOpen ? '🔥 ' + e.seats + '자리 발생!' : '마감'}</span>
             </div>
             <button onclick="copyToClipboard('${e.code}${e.bun}', this)" class="text-[10px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">
@@ -712,24 +855,15 @@ HTML_CONTENT = """<!DOCTYPE html>
       }).join('');
     }
 
-    let currentSort = 'SEATS_DESC';
-
     function setSort(field) {
-      if (field === 'seats') {
-        currentSort = currentSort === 'SEATS_DESC' ? 'SEATS_ASC' : 'SEATS_DESC';
-      } else if (field === 'name') {
-        currentSort = currentSort === 'NAME_ASC' ? 'NAME_DESC' : 'NAME_ASC';
-      } else if (field === 'code') {
-        currentSort = currentSort === 'CODE_ASC' ? 'CODE_DESC' : 'CODE_ASC';
-      } else if (field === 'prof') {
-        currentSort = currentSort === 'PROF_ASC' ? 'PROF_DESC' : 'PROF_ASC';
-      } else if (field === 'enrolled') {
-        currentSort = currentSort === 'ENROLLED_DESC' ? 'ENROLLED_ASC' : 'ENROLLED_DESC';
-      } else if (field === 'time') {
-        currentSort = currentSort === 'TIME_ASC' ? 'TIME_DESC' : 'TIME_ASC';
-      } else if (field === 'category') {
-        currentSort = currentSort === 'CAT_ASC' ? 'CAT_DESC' : 'CAT_ASC';
-      }
+      if (field === 'seats') currentSort = currentSort === 'SEATS_DESC' ? 'SEATS_ASC' : 'SEATS_DESC';
+      else if (field === 'name') currentSort = currentSort === 'NAME_ASC' ? 'NAME_DESC' : 'NAME_ASC';
+      else if (field === 'code') currentSort = currentSort === 'CODE_ASC' ? 'CODE_DESC' : 'CODE_ASC';
+      else if (field === 'prof') currentSort = currentSort === 'PROF_ASC' ? 'PROF_DESC' : 'PROF_ASC';
+      else if (field === 'enrolled') currentSort = currentSort === 'ENROLLED_DESC' ? 'ENROLLED_ASC' : 'ENROLLED_DESC';
+      else if (field === 'time') currentSort = currentSort === 'TIME_ASC' ? 'TIME_DESC' : 'TIME_ASC';
+      else if (field === 'category') currentSort = currentSort === 'CAT_ASC' ? 'CAT_DESC' : 'CAT_ASC';
+
       const selectElem = document.getElementById('sortSelect');
       if (selectElem) selectElem.value = currentSort;
       renderCourses();
@@ -742,13 +876,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function updateSortHeaderIcons() {
       const icons = {
-        sort_icon_seats: '',
-        sort_icon_code: '',
-        sort_icon_name: '',
-        sort_icon_prof: '',
-        sort_icon_time: '',
-        sort_icon_enrolled: '',
-        sort_icon_category: ''
+        sort_icon_seats: '', sort_icon_code: '', sort_icon_name: '',
+        sort_icon_prof: '', sort_icon_time: '', sort_icon_enrolled: '', sort_icon_category: ''
       };
       if (currentSort === 'SEATS_DESC') icons.sort_icon_seats = '▼';
       else if (currentSort === 'SEATS_ASC') icons.sort_icon_seats = '▲';
@@ -775,11 +904,13 @@ HTML_CONTENT = """<!DOCTYPE html>
       const search = document.getElementById('searchInput').value.trim().toLowerCase();
       const cat = document.getElementById('categoryFilter').value;
       const openOnly = document.getElementById('openOnlyToggle').checked;
+      const starredOnly = document.getElementById('starredOnlyToggle').checked;
 
       const allCourses = Array.from(courseMap.values());
 
       const filtered = allCourses.filter(c => {
         if (openOnly && c.seats <= 0) return false;
+        if (starredOnly && !starredKeys.has(c.full_code)) return false;
         if (cat !== 'ALL') {
           if (cat === '교양선택') {
             if (!c.category.includes('교선') && !c.category.includes('교양선택')) return false;
@@ -798,7 +929,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         return true;
       });
 
-      // Apply Sort
       if (currentSort === 'SEATS_DESC') {
         filtered.sort((a, b) => b.seats - a.seats || a.code.localeCompare(b.code));
       } else if (currentSort === 'SEATS_ASC') {
@@ -808,46 +938,38 @@ HTML_CONTENT = """<!DOCTYPE html>
           if (b.seats > 0) return 1;
           return a.code.localeCompare(b.code);
         });
-      } else if (currentSort === 'NAME_ASC') {
-        filtered.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
-      } else if (currentSort === 'NAME_DESC') {
-        filtered.sort((a, b) => b.name.localeCompare(a.name, 'ko'));
-      } else if (currentSort === 'CODE_ASC') {
-        filtered.sort((a, b) => a.full_code.localeCompare(b.full_code));
-      } else if (currentSort === 'CODE_DESC') {
-        filtered.sort((a, b) => b.full_code.localeCompare(a.full_code));
-      } else if (currentSort === 'PROF_ASC') {
-        filtered.sort((a, b) => (a.prof || '').localeCompare(b.prof || '', 'ko'));
-      } else if (currentSort === 'PROF_DESC') {
-        filtered.sort((a, b) => (b.prof || '').localeCompare(a.prof || '', 'ko'));
-      } else if (currentSort === 'ENROLLED_DESC') {
-        filtered.sort((a, b) => b.enrolled - a.enrolled || a.code.localeCompare(b.code));
-      } else if (currentSort === 'ENROLLED_ASC') {
-        filtered.sort((a, b) => a.enrolled - b.enrolled || a.code.localeCompare(b.code));
-      } else if (currentSort === 'TIME_ASC') {
-        filtered.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-      } else if (currentSort === 'TIME_DESC') {
-        filtered.sort((a, b) => (b.time || '').localeCompare(a.time || ''));
-      } else if (currentSort === 'CAT_ASC') {
-        filtered.sort((a, b) => (a.category || '').localeCompare(b.category || '', 'ko'));
-      } else if (currentSort === 'CAT_DESC') {
-        filtered.sort((a, b) => (b.category || '').localeCompare(a.category || '', 'ko'));
-      }
+      } else if (currentSort === 'NAME_ASC') filtered.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+      else if (currentSort === 'NAME_DESC') filtered.sort((a, b) => b.name.localeCompare(a.name, 'ko'));
+      else if (currentSort === 'CODE_ASC') filtered.sort((a, b) => a.full_code.localeCompare(b.full_code));
+      else if (currentSort === 'CODE_DESC') filtered.sort((a, b) => b.full_code.localeCompare(a.full_code));
+      else if (currentSort === 'PROF_ASC') filtered.sort((a, b) => (a.prof || '').localeCompare(b.prof || '', 'ko'));
+      else if (currentSort === 'PROF_DESC') filtered.sort((a, b) => (b.prof || '').localeCompare(a.prof || '', 'ko'));
+      else if (currentSort === 'ENROLLED_DESC') filtered.sort((a, b) => b.enrolled - a.enrolled || a.code.localeCompare(b.code));
+      else if (currentSort === 'ENROLLED_ASC') filtered.sort((a, b) => a.enrolled - b.enrolled || a.code.localeCompare(b.code));
+      else if (currentSort === 'TIME_ASC') filtered.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+      else if (currentSort === 'TIME_DESC') filtered.sort((a, b) => (b.time || '').localeCompare(a.time || ''));
+      else if (currentSort === 'CAT_ASC') filtered.sort((a, b) => (a.category || '').localeCompare(b.category || '', 'ko'));
+      else if (currentSort === 'CAT_DESC') filtered.sort((a, b) => (b.category || '').localeCompare(a.category || '', 'ko'));
 
       updateSortHeaderIcons();
-
       document.getElementById('filteredCount').innerText = `${filtered.length}개 강좌 표시 중`;
 
       const tbody = document.getElementById('courseTableBody');
       if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-zinc-500">조건에 맞는 강좌가 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-zinc-500">조건에 맞는 강좌가 없습니다.</td></tr>';
         return;
       }
 
       tbody.innerHTML = filtered.map(c => {
         const isOpen = c.seats > 0;
+        const isStarred = starredKeys.has(c.full_code);
         return `
-          <tr class="hover:bg-zinc-800/40 transition border-b border-zinc-800/40 ${isOpen ? 'bg-emerald-950/20' : ''}">
+          <tr class="hover:bg-zinc-800/40 transition border-b border-zinc-800/40 ${isStarred ? 'bg-amber-950/20' : (isOpen ? 'bg-emerald-950/20' : '')}">
+            <td class="py-3 px-3 text-center">
+              <button onclick="toggleSubscription('${c.full_code}')" title="${isStarred ? '구독 해제' : '알림 구독'}" class="text-base transition ${isStarred ? 'text-amber-400 scale-110' : 'text-zinc-600 hover:text-zinc-400'}">
+                <i class="fa-solid fa-star"></i>
+              </button>
+            </td>
             <td class="py-3 px-4 whitespace-nowrap">
               ${isOpen 
                 ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
@@ -907,25 +1029,19 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         eventSource.addEventListener('update', (e) => {
           const data = JSON.parse(e.data);
-          let hasNewVacancy = false;
 
           (data.changes || []).forEach(c => {
-            const prev = courseMap.get(c.full_code);
             courseMap.set(c.full_code, c);
 
             if (c.seats > 0) {
               if (isInitialized && !knownOpenKeys.has(c.full_code)) {
-                hasNewVacancy = true;
+                triggerAlertForCourse(c);
               }
               knownOpenKeys.add(c.full_code);
             } else {
               knownOpenKeys.delete(c.full_code);
             }
           });
-
-          if (hasNewVacancy) {
-            playBeep();
-          }
 
           if (data.events && data.events.length > 0) {
             eventsList = [...data.events, ...eventsList].slice(0, 50);
@@ -937,7 +1053,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         });
 
         eventSource.onerror = (err) => {
-          console.warn('SSE disconnected, falling back to polling...', err);
           document.getElementById('connBadge').className = "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20";
           document.getElementById('connLabel').innerText = "폴링 백업";
           fallbackPolling();
@@ -957,7 +1072,14 @@ HTML_CONTENT = """<!DOCTYPE html>
           courseMap.clear();
           (data.courses || []).forEach(c => {
             courseMap.set(c.full_code, c);
-            if (c.seats > 0) knownOpenKeys.add(c.full_code);
+            if (c.seats > 0) {
+              if (isInitialized && !knownOpenKeys.has(c.full_code)) {
+                triggerAlertForCourse(c);
+              }
+              knownOpenKeys.add(c.full_code);
+            } else {
+              knownOpenKeys.delete(c.full_code);
+            }
           });
           updateStatsUI(data.stats);
           renderEvents(data.events);
@@ -968,8 +1090,38 @@ HTML_CONTENT = """<!DOCTYPE html>
       }, 3000);
     }
 
-    // Start
-    initSSE();
+    async function loadInitialData() {
+      try {
+        const res = await fetch('/api/data');
+        const data = await res.json();
+        if (data && data.courses) {
+          courseMap.clear();
+          data.courses.forEach(c => {
+            courseMap.set(c.full_code, c);
+            if (c.seats > 0) knownOpenKeys.add(c.full_code);
+          });
+          eventsList = data.events || [];
+          updateStatsUI(data.stats);
+          renderEvents(eventsList);
+          renderCourses();
+          isInitialized = true;
+        }
+      } catch (e) {
+        console.error("Initial load error:", e);
+      }
+    }
+
+    function init() {
+      initSettings();
+      loadInitialData();
+      initSSE();
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
   </script>
 </body>
 </html>"""
