@@ -63,12 +63,20 @@ class DaejinAtomicSwapper:
             "full_code": "92261601"
         }
 
-        # Desired new course
+        # Desired new course (1st Priority Swap)
         self.target_course = {
             "name": "AI기반프로그래밍입문",
             "code": "922605",
             "bun": "01",
             "full_code": "92260501"
+        }
+
+        # Backup course for extra safety net (2nd Priority Fallback)
+        self.backup_course = {
+            "name": "AI시대의콘텐츠크리에이션(02분반)",
+            "code": "922616",
+            "bun": "02",
+            "full_code": "92261602"
         }
 
         self.session = requests.Session()
@@ -205,19 +213,32 @@ class DaejinAtomicSwapper:
             return True
         else:
             logger.warning(f"⚠️ [APPLY FAILED] Reason: {alert}. Initiating instant rollback to old course...")
-            # Step 3: Rollback
+            # Step 3: Rollback to old course (01분반)
             t2 = time.perf_counter()
             rolled_back, rb_alert = self.apply_course(self.old_course)
             t_rb = (time.perf_counter() - t2) * 1000
-            logger.info(f"   ↳ Step 3 (Rollback Old): {t_rb:.1f}ms | Success={rolled_back} | Alert='{rb_alert}'")
+            logger.info(f"   ↳ Step 3 (Rollback Old 01분반): {t_rb:.1f}ms | Success={rolled_back} | Alert='{rb_alert}'")
 
             if rolled_back:
-                logger.info("🛡️ [ROLLBACK COMPLETE] Safely recovered existing course. No loss.")
+                logger.info("🛡️ [ROLLBACK COMPLETE] Safely recovered existing 01분반 course. No loss.")
             else:
-                logger.error("🚨 [CRITICAL ALERT] Rollback failed! Immediate manual check required!")
-                self.send_discord_alert(
-                    f"🚨🚨 **[긴급 수동 확인 요망]** 스왑 실패 및 롤백 경보 발생! 즉시 수강신청 확인/취소 메뉴를 확인해주세요!"
-                )
+                # Step 3.5: Emergency backup to 02분반 (목 15:30)
+                logger.warning("⚠️ 01분반 복구 실패! 02분반(목15:30) 즉시 비상 낚아채기 시도...")
+                t3 = time.perf_counter()
+                bk_success, bk_alert = self.apply_course(self.backup_course)
+                t_bk = (time.perf_counter() - t3) * 1000
+                logger.info(f"   ↳ Step 3.5 (Grab Backup 02분반): {t_bk:.1f}ms | Success={bk_success} | Alert='{bk_alert}'")
+                
+                if bk_success:
+                    logger.info("🎉 [BACKUP SECURED] 02분반(목15:30) 성공적으로 확보 완료!")
+                    self.send_discord_alert(
+                        f"🎉 **[비상 분반 확보 성공]** 01분반 마감으로 **{self.backup_course['name']}**으로 대체 확보되었습니다!"
+                    )
+                else:
+                    logger.error("🚨 [CRITICAL ALERT] Rollback and backup failed! Immediate manual check required!")
+                    self.send_discord_alert(
+                        f"🚨🚨 **[긴급 수동 확인 요망]** 스왑 실패 및 롤백 경보 발생! 즉시 수강신청 확인/취소 메뉴를 확인해주세요!"
+                    )
             return False
 
     def run(self):
