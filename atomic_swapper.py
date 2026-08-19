@@ -109,23 +109,16 @@ class DaejinAtomicSwapper:
             r = self.session.get(QUERY_URL, timeout=4)
             html = r.content.decode("euc-kr", "replace")
             
-            # Fast regex table row search
-            if BeautifulSoup:
-                soup = BeautifulSoup(html, "html.parser")
-                for tr in soup.find_all("tr"):
-                    row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                    if len(row) > 8 and self.target_course["code"] in row[1]:
-                        rem_str = row[8]
-                        if rem_str.isdigit():
-                            return int(rem_str), row[7]
-            else:
-                # Pure regex fallback
-                pattern = rf"{self.target_course['code']}.*?(\d+)\s*</td>\s*<td[^>]*>\s*(\d+)\s*</td>"
-                m = re.search(pattern, html, re.DOTALL)
-                if m:
-                    enrolled = m.group(1)
-                    rem = int(m.group(2))
-                    return rem, enrolled
+            # Exact regex on seat data-key
+            m = re.search(rf'class=[\"\']seat[\"\'][^>]*data-key=[\"\']{self.target_course["full_code"]}[\"\'][^>]*>(\d+)<', html)
+            if m:
+                rem = int(m.group(1))
+                return rem, "Checked"
+            
+            # Fallback check on button status
+            if f'data-key="{self.target_course["full_code"]}"' in html and 'soldlabel' in html:
+                return 0, "Full"
+
             return 0, "?"
         except Exception as e:
             logger.warning(f"Seat query error: {e}")
