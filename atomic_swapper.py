@@ -213,9 +213,6 @@ class DaejinAtomicSwapper:
 
             if rolled_back:
                 logger.info("🛡️ [ROLLBACK COMPLETE] Safely recovered existing course. No loss.")
-                self.send_discord_alert(
-                    f"⚠️ **[스왑 재시도 안내]** 빈자리 잡기 실패 후 기존 과목(`{self.old_course['name']}`) 안전하게 원상복구 완료 (무손실 재대기 중)."
-                )
             else:
                 logger.error("🚨 [CRITICAL ALERT] Rollback failed! Immediate manual check required!")
                 self.send_discord_alert(
