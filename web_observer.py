@@ -500,15 +500,21 @@ HTML_CONTENT = """<!DOCTYPE html>
         <!-- Alert Scope Selector -->
         <select id="alertModeSelect" onchange="changeAlertMode()" 
                 class="bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-blue-500 font-medium">
-          <option value="STARRED_ONLY">⭐ 구독 과목만 알림</option>
           <option value="ALL_OPEN">🔥 전체 빈자리 알림</option>
+          <option value="STARRED_ONLY">⭐ 구독 과목만 알림</option>
           <option value="MUTED">🔕 알림 끄기</option>
         </select>
 
-        <button id="soundToggle" onclick="toggleSound()" class="px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
-          <i id="soundIcon" class="fa-solid fa-volume-high text-emerald-400"></i>
-          <span id="soundLabel">소리 ON</span>
-        </button>
+        <div class="flex items-center gap-1">
+          <button id="soundToggle" onclick="toggleSound()" class="px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition flex items-center gap-1.5 text-zinc-300">
+            <i id="soundIcon" class="fa-solid fa-volume-high text-emerald-400"></i>
+            <span id="soundLabel">소리 ON</span>
+          </button>
+          <button onclick="testSoundBtn()" title="알림음 즉시 테스트 및 iOS 오디오 활성화" class="px-2 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 transition text-zinc-400 hover:text-emerald-400 text-xs flex items-center gap-1">
+            <i class="fa-solid fa-volume-low"></i>
+            <span class="hidden sm:inline">테스트</span>
+          </button>
+        </div>
       </div>
     </div>
   </header>
@@ -675,7 +681,89 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     // Watchlist / Subscriptions
     let starredKeys = new Set(JSON.parse(localStorage.getItem('daejin_starred_courses') || '[]'));
-    let alertMode = localStorage.getItem('daejin_alert_mode') || 'STARRED_ONLY';
+    let alertMode = localStorage.getItem('daejin_alert_mode') || 'ALL_OPEN';
+
+    // Web Audio API Context & iOS Unlock
+    let audioCtx = null;
+
+    function getAudioContext() {
+      if (!audioCtx) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          audioCtx = new AudioContextClass();
+        }
+      }
+      return audioCtx;
+    }
+
+    function unlockAudio() {
+      const ctx = getAudioContext();
+      if (ctx && ctx.state === 'suspended') {
+        ctx.resume();
+      }
+      // Play 1-sample silent buffer to unlock iOS Safari Web Audio
+      if (ctx) {
+        try {
+          const buffer = ctx.createBuffer(1, 1, 22050);
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(ctx.destination);
+          source.start(0);
+        } catch (e) {}
+      }
+      const audio = document.getElementById('alertAudio');
+      if (audio) {
+        audio.play().then(() => {
+          audio.pause();
+          audio.currentTime = 0;
+        }).catch(() => {});
+      }
+    }
+
+    // Auto-unlock audio engine on first user interaction anywhere on screen
+    ['click', 'touchstart', 'touchend', 'pointerdown'].forEach(evt => {
+      document.addEventListener(evt, unlockAudio, { passive: true });
+    });
+
+    function playSynthChime() {
+      const ctx = getAudioContext();
+      if (!ctx) return false;
+      try {
+        if (ctx.state === 'suspended') {
+          ctx.resume();
+        }
+        const now = ctx.currentTime;
+        
+        // High-clarity pleasant dual chime: 987Hz (B5) -> 1318Hz (E6) -> 1760Hz (A6)
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(987.77, now);
+        osc1.frequency.exponentialRampToValueAtTime(1318.51, now + 0.08);
+
+        osc2.type = 'triangle';
+        osc2.frequency.setValueAtTime(1975.53, now);
+        osc2.frequency.exponentialRampToValueAtTime(2637.02, now + 0.08);
+
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc1.start(now);
+        osc2.start(now);
+        osc1.stop(now + 0.65);
+        osc2.stop(now + 0.65);
+        return true;
+      } catch (err) {
+        console.warn("Synth chime failed:", err);
+        return false;
+      }
+    }
 
     function initSettings() {
       const modeSelect = document.getElementById('alertModeSelect');
@@ -765,17 +853,36 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     function toggleSound() {
+      unlockAudio();
       soundEnabled = !soundEnabled;
       document.getElementById('soundIcon').className = soundEnabled ? 'fa-solid fa-volume-high text-emerald-400' : 'fa-solid fa-volume-xmark text-zinc-500';
       document.getElementById('soundLabel').innerText = soundEnabled ? '소리 ON' : '소리 OFF';
+      if (soundEnabled) {
+        playSynthChime();
+      }
+    }
+
+    function testSoundBtn() {
+      unlockAudio();
+      soundEnabled = true;
+      document.getElementById('soundIcon').className = 'fa-solid fa-volume-high text-emerald-400';
+      document.getElementById('soundLabel').innerText = '소리 ON';
+      playSynthChime();
     }
 
     function playBeep() {
       if (!soundEnabled || alertMode === 'MUTED') return;
-      const audio = document.getElementById('alertAudio');
-      if (audio) {
-        audio.currentTime = 0;
-        audio.play().catch(() => {});
+      
+      // 1. Try synthesized Web Audio (zero network latency & iOS Safari background compatible)
+      const played = playSynthChime();
+      
+      // 2. Fallback to HTML5 audio element
+      if (!played) {
+        const audio = document.getElementById('alertAudio');
+        if (audio) {
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        }
       }
     }
 
