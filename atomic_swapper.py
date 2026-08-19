@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Daejin University Multi-Target Safe Course Swapper
+Daejin University Smart Asymmetric Course Swapper
 =================================================
-Strategy:
-  1. Simultaneously monitor:
-     - Target A: 922605-01 (AI기반프로그래밍입문)
-     - Target B: 922616-02 (AI시대의콘텐츠크리에이션 02분반)
-  2. While both have 0 seats:
-     - Keep existing 922616-01 (01분반) completely safe and intact.
-  3. When Target A or Target B opens up (seats > 0):
-     - Step 1: Drop existing 922616-01 (10ms)
-     - Step 2: Grab the opened target (10ms)
-     - Step 3: If apply fails:
-         a) Instantly re-grab 922616-01 (10ms)
-         b) If that fails too, instantly grab 922616-02 (10ms)
-  4. Send Discord DM ONLY upon final confirmed success.
+Logic:
+  1. Currently held: 922616-01 (화 15:30~17:30)
+  2. Monitored targets:
+     - Target A: 922605-01 (AI기반프로그래밍입문 / 화 15:30) -> Ultimate Goal
+     - Target B: 922616-02 (AI시대의콘텐츠크리에이션 02분반 / 목 15:30) -> Safe Intermediate
+  3. Actions on vacancy:
+     - Case 1: 922616-02 opens up while holding 922616-01:
+       * Try direct apply 922616-02 FIRST without dropping 01분반.
+       * If successful -> Drop 922616-01 immediately, update held to 922616-02.
+       * If direct apply blocked by duplicate check -> Atomic swap (drop 01 -> apply 02 -> rollback to 01 on fail).
+       * After switching to 922616-02, CONTINUE monitoring for 922605-01!
+     - Case 2: 922605-01 opens up (whether holding 01분반 or 02분반):
+       * Drop currently held course (01 or 02) -> Apply 922605-01.
+       * If successful -> Mission Complete! Alert Discord and finish.
+       * If failed -> Instant rollback to currently held course.
 """
 
 import os
@@ -33,7 +35,7 @@ logging.basicConfig(
     format="[%(asctime)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-logger = logging.getLogger("MultiTargetSwapper")
+logger = logging.getLogger("SmartSwapper")
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
@@ -43,7 +45,7 @@ APPLY_API_URL = f"{BASE_URL}/sugang/NSugangWlsn0410"
 QUERY_URL = f"{BASE_URL}/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42006&ppage=1"
 
 
-class DaejinMultiTargetSwapper:
+class DaejinSmartSwapper:
     def __init__(self, config_path="config.json"):
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
@@ -54,31 +56,28 @@ class DaejinMultiTargetSwapper:
         self.discord_bot_token = self.config.get("discord_bot_token", "")
         self.discord_channel_id = self.config.get("discord_channel_id", "")
 
-        # Current course to drop
-        self.old_course = {
+        # Course definitions
+        self.course_616_01 = {
             "name": "AI시대의콘텐츠크리에이션(01분반)",
             "code": "922616",
             "bun": "01",
             "full_code": "92261601"
         }
+        self.course_616_02 = {
+            "name": "AI시대의콘텐츠크리에이션(02분반)",
+            "code": "922616",
+            "bun": "02",
+            "full_code": "92261602"
+        }
+        self.course_605_01 = {
+            "name": "AI기반프로그래밍입문(01분반)",
+            "code": "922605",
+            "bun": "01",
+            "full_code": "92260501"
+        }
 
-        # Desired targets to watch
-        self.targets = [
-            {
-                "name": "AI기반프로그래밍입문",
-                "code": "922605",
-                "bun": "01",
-                "full_code": "92260501",
-                "priority": 1
-            },
-            {
-                "name": "AI시대의콘텐츠크리에이션(02분반)",
-                "code": "922616",
-                "bun": "02",
-                "full_code": "92261602",
-                "priority": 2
-            }
-        ]
+        # Track currently held course
+        self.currently_held = self.course_616_01
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -113,14 +112,13 @@ class DaejinMultiTargetSwapper:
             self.login()
 
     def check_seats(self):
-        """Passively checks seats for all target courses in a single request."""
+        """Passively checks seats for 922605-01 and 922616-02 in a single request."""
         try:
             r = self.session.get(QUERY_URL, timeout=4)
             html = r.content.decode("euc-kr", "replace")
             
             results = {}
-            for t in self.targets:
-                key = t["full_code"]
+            for key in ["92260501", "92261602"]:
                 m = re.search(rf'class=[\"\']seat[\"\'][^>]*data-key=[\"\']{key}[\"\'][^>]*>(\d+)<', html)
                 if m:
                     results[key] = int(m.group(1))
@@ -182,71 +180,90 @@ class DaejinMultiTargetSwapper:
         except Exception:
             pass
 
-    def perform_swap(self, chosen_target):
-        logger.info(f"🚨 [SWAP TRIGGERED] Target seat vacancy in {chosen_target['name']} ({chosen_target['full_code']})!")
+    def handle_616_02_opened(self):
+        """Case B: 922616-02 opens while holding 922616-01."""
+        logger.info("⚡ [616-02 VACANCY DETECTED] Attempting direct application for 616-02 first...")
         
-        # Step 1: Drop old course
+        # Step 1: Try direct apply 616-02
         t0 = time.perf_counter()
-        dropped = self.drop_course(self.old_course)
-        t_drop = (time.perf_counter() - t0) * 1000
-        logger.info(f"   ↳ Step 1 (Drop Old 01분반): {t_drop:.1f}ms | Success={dropped}")
-
-        # Step 2: Grab the new chosen target
-        t1 = time.perf_counter()
-        applied, alert = self.apply_course(chosen_target)
-        t_apply = (time.perf_counter() - t1) * 1000
-        logger.info(f"   ↳ Step 2 (Apply New {chosen_target['name']}): {t_apply:.1f}ms | Success={applied} | Alert='{alert}'")
+        applied, alert = self.apply_course(self.course_616_02)
+        t_apply = (time.perf_counter() - t0) * 1000
+        logger.info(f"   ↳ Direct Apply 616-02: {t_apply:.1f}ms | Success={applied} | Alert='{alert}'")
 
         if applied:
-            logger.info(f"🎉🎉 [SWAP SUCCESSFUL] Successfully enrolled into {chosen_target['name']}!")
+            logger.info("🎉 616-02 신청 성공! 기존 01분반 정리 진행...")
+            self.drop_course(self.course_616_01)
+            self.currently_held = self.course_616_02
             self.send_discord_alert(
-                f"🎉🎉 **[수강신청 과목 교체 성공!]** 🎉🎉\n"
+                f"🎉 **[중간 분반 교체 성공]** 616-01 ➡️ **616-02(목15:30)** 교체 완료!\n"
+                f"👉 605-01(AI프로그래밍입문) 취소표 계속 감시 진행 중!"
+            )
+            return True
+
+        # If direct apply failed due to duplicate check or capacity
+        if "이미" in alert or "중복" in alert:
+            logger.info("ℹ️ 동일과목 중복 차단 감지 -> 01분반 취소 후 02분반 스왑 시도...")
+            self.drop_course(self.course_616_01)
+            applied2, alert2 = self.apply_course(self.course_616_02)
+            if applied2:
+                logger.info("🎉 01분반 취소 후 616-02 스왑 성공!")
+                self.currently_held = self.course_616_02
+                self.send_discord_alert(
+                    f"🎉 **[중간 분반 교체 성공]** **616-02(목15:30)** 확보 완료!\n"
+                    f"👉 605-01(AI프로그래밍입문) 취소표 계속 감시 진행 중!"
+                )
+                return True
+            else:
+                logger.warning("⚠️ 616-02 스왑 실패, 01분반 롤백 복구 시도...")
+                self.apply_course(self.course_616_01)
+                return False
+        return False
+
+    def handle_605_01_opened(self):
+        """Case A: 922605-01 opens (Ultimate Target)."""
+        logger.info(f"🚨 [605-01 VACANCY DETECTED] Dropping currently held ({self.currently_held['name']}) and sniping 605-01...")
+        
+        # Step 1: Drop currently held course
+        t0 = time.perf_counter()
+        dropped = self.drop_course(self.currently_held)
+        t_drop = (time.perf_counter() - t0) * 1000
+        logger.info(f"   ↳ Drop {self.currently_held['name']}: {t_drop:.1f}ms | Success={dropped}")
+
+        # Step 2: Apply 605-01
+        t1 = time.perf_counter()
+        applied, alert = self.apply_course(self.course_605_01)
+        t_apply = (time.perf_counter() - t1) * 1000
+        logger.info(f"   ↳ Apply 605-01: {t_apply:.1f}ms | Success={applied} | Alert='{alert}'")
+
+        if applied:
+            logger.info("🎉🎉🎉 [FINAL GOAL ACHIEVED] Successfully enrolled into 922605-01 AI기반프로그래밍입문!")
+            self.send_discord_alert(
+                f"🎉🎉 **[최종 목표 달성! 수강신청 교체 완료]** 🎉🎉\n"
                 f"👤 **학번**: `{self.std_no}`\n"
-                f"✅ **신규 확정**: **{chosen_target['name']}** (`{chosen_target['full_code']}`)\n"
-                f"🗑️ **기존 취소**: **{self.old_course['name']}** (`{self.old_course['full_code']}`)\n"
+                f"✅ **최종 확정**: **AI기반프로그래밍입문 (922605-01)** (화 15:30)\n"
+                f"🗑️ **기존 취소**: **{self.currently_held['name']}**\n"
                 f"⚡ **스왑 소요 시간**: `{t_drop + t_apply:.1f}ms`\n"
-                f"👉 원하는 과목으로 교체 성공했습니다!"
+                f"👉 꿀과목으로 최종 교체 완료했습니다!"
             )
             return True
         else:
-            logger.warning(f"⚠️ [APPLY FAILED] Reason: {alert}. Initiating instant rollback chain...")
-            # Step 3: Rollback to original 01분반
-            t2 = time.perf_counter()
-            rolled_back, rb_alert = self.apply_course(self.old_course)
-            t_rb = (time.perf_counter() - t2) * 1000
-            logger.info(f"   ↳ Step 3 (Rollback Old 01분반): {t_rb:.1f}ms | Success={rolled_back} | Alert='{rb_alert}'")
-
-            if rolled_back:
-                logger.info("🛡️ [ROLLBACK COMPLETE] Safely recovered existing 01분반 course. No loss.")
+            logger.warning(f"⚠️ 605-01 신청 실패 ({alert}). 들고 있던 과목({self.currently_held['name']}) 즉시 롤백 복구...")
+            rb_success, rb_alert = self.apply_course(self.currently_held)
+            if rb_success:
+                logger.info("🛡️ [ROLLBACK COMPLETE] 기존 과목 무손실 안전 복구 완료.")
             else:
-                # Step 3.5: Fallback to the OTHER target if 01분반 is lost
-                other_target = self.targets[1] if chosen_target == self.targets[0] else self.targets[0]
-                logger.warning(f"⚠️ 01분반 복구 실패! 대체 과목 {other_target['name']} 비상 신청...")
-                t3 = time.perf_counter()
-                alt_success, alt_alert = self.apply_course(other_target)
-                t_alt = (time.perf_counter() - t3) * 1000
-                logger.info(f"   ↳ Step 3.5 (Grab Alternative {other_target['name']}): {t_alt:.1f}ms | Success={alt_success} | Alert='{alt_alert}'")
-                
-                if alt_success:
-                    logger.info(f"🎉 [ALTERNATIVE SECURED] {other_target['name']} 확보 완료!")
-                    self.send_discord_alert(
-                        f"🎉 **[대체 과목 확보 성공]** 원래 과목 대신 **{other_target['name']}**으로 확보되었습니다!"
-                    )
-                else:
-                    logger.error("🚨 [CRITICAL ALERT] All recovery attempts failed! Check manually!")
-                    self.send_discord_alert(
-                        f"🚨🚨 **[긴급 수동 확인 요망]** 스왑 및 복구 실패 경보 발생! 즉시 수강신청 확인/취소 메뉴를 확인해주세요!"
-                    )
+                logger.warning("⚠️ 기존 과목 복구 실패 -> 반대쪽 616 분반 비상 신청 시도...")
+                alt_616 = self.course_616_02 if self.currently_held == self.course_616_01 else self.course_616_01
+                self.apply_course(alt_616)
             return False
 
     def run(self):
         logger.info("=" * 70)
-        logger.info("🛡️ Daejin University Multi-Target Course Swapper")
-        logger.info(f"🔄 Current Held: {self.old_course['name']} ({self.old_course['full_code']})")
-        logger.info("🎯 Targets Monitored (Either one opens -> Swap):")
-        for t in self.targets:
-            logger.info(f"  • {t['name']} ({t['full_code']}) [우선순위 {t['priority']}]")
-        logger.info("🛡️ Safety: Current course NEVER dropped until a target has seats > 0.")
+        logger.info("🛡️ Daejin University Smart Asymmetric Course Swapper")
+        logger.info(f"🔄 Currently Held: {self.currently_held['name']}")
+        logger.info("🎯 Targets:")
+        logger.info(f"  • 605-01 (AI기반프로그래밍입문) -> [최종 목표: 잡히면 616 정리 후 즉시 종료]")
+        logger.info(f"  • 616-02 (콘텐츠 02분반 / 목15:30) -> [중간 안전 확보: 선신청 후 01분반 취소]")
         logger.info("=" * 70)
 
         if not self.login():
@@ -258,33 +275,32 @@ class DaejinMultiTargetSwapper:
             self.ensure_session()
             
             seat_map = self.check_seats()
-            
-            # Sort candidates: 605-01 first, then 616-02
-            opened_target = None
-            for t in self.targets:
-                if seat_map.get(t["full_code"], 0) > 0:
-                    opened_target = t
-                    break
+            s_605_01 = seat_map.get("92260501", 0)
+            s_616_02 = seat_map.get("92261602", 0)
 
             if loop % 25 == 0:
-                s1 = seat_map.get("92260501", 0)
-                s2 = seat_map.get("92261602", 0)
-                logger.info(f"⏳ [감시 #{loop}] 922605-01 여석: {s1} | 922616-02 여석: {s2} | 기존 616-01 안전 유지 중")
+                logger.info(f"⏳ [감시 #{loop}] 605-01 여석: {s_605_01} | 616-02 여석: {s_616_02} | 보유과목: {self.currently_held['name']}")
 
-            if opened_target:
-                logger.info(f"🔥 빈자리 발견! {opened_target['name']} ({opened_target['full_code']}) 여석 발생")
-                success = self.perform_swap(opened_target)
-                if success:
+            # Priority 1: 605-01 opens -> Final Swap!
+            if s_605_01 > 0:
+                logger.info(f"🔥 [최종 목표 발견] 605-01 여석 {s_605_01}개 발생!")
+                final_success = self.handle_605_01_opened()
+                if final_success:
                     break
-                else:
-                    time.sleep(1.0)
+                time.sleep(1.0)
 
-            # Sleep 1.1s with random jitter
+            # Priority 2: 616-02 opens while holding 616-01 -> Safe Shift!
+            elif s_616_02 > 0 and self.currently_held == self.course_616_01:
+                logger.info(f"🔥 [중간 분반 발견] 616-02 여석 {s_616_02}개 발생!")
+                self.handle_616_02_opened()
+                time.sleep(1.0)
+
+            # Sleep with jitter
             jitter = random.uniform(-0.15, 0.15)
             time.sleep(max(0.6, 1.1 + jitter))
 
 
 if __name__ == "__main__":
     cfg_file = sys.argv[1] if len(sys.argv) > 1 else "config.json"
-    swapper = DaejinMultiTargetSwapper(cfg_file)
+    swapper = DaejinSmartSwapper(cfg_file)
     swapper.run()
