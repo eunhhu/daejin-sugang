@@ -156,12 +156,13 @@ class DaejinVacancyHunter:
 
     def run(self):
         logger.info("=" * 70)
-        logger.info("🎯 Daejin University Course Vacancy Hunter (취소표 줍기 봇)")
+        logger.info("🎯 Daejin University Course Vacancy Hunter (스마트 잔여석 감시형)")
         logger.info("=" * 70)
         logger.info(f"👀 Monitoring {len(self.target_courses)} target courses for vacancies...")
         for t in self.target_courses:
             logger.info(f"  • {t.get('name', 'Unknown')} ({t.get('code')}-{t.get('bun')})")
         logger.info(f"⏱️ Polling interval: {self.poll_interval}s (+ random jitter)")
+        logger.info("🛡️ [안전 모드] 잔여석 0석일 때 무차별 신청 전송(300회 밴 위험) 방지 -> 빈자리 발생 시에만 즉시 패킷 사출!")
         logger.info("=" * 70)
 
         if not self.login():
@@ -176,11 +177,33 @@ class DaejinVacancyHunter:
                 loop_count += 1
                 self.ensure_session_alive()
 
+                # Step 1: Query seat availability from live observer API without firing apply requests
+                course_map = {}
+                try:
+                    r_obs = requests.get("https://daejin.qucord.com/api/data", timeout=2.5)
+                    if r_obs.status_code == 200:
+                        obs_data = r_obs.json()
+                        course_map = {c["full_code"]: c for c in obs_data.get("courses", [])}
+                except Exception:
+                    pass
+
                 for item in list(active_targets):
                     name = item.get("name", "Unknown")
                     code = item.get("code")
                     sec = item.get("bun")
+                    full_code = f"{code}{sec}"
 
+                    # Check seats before applying
+                    c_info = course_map.get(full_code)
+                    seats = c_info.get("seats", 0) if c_info else None
+
+                    # Only fire apply if seats > 0 or if observer data is unavailable
+                    if seats is not None and seats <= 0:
+                        if loop_count % 20 == 0:
+                            logger.info(f"⏳ [감시 #{loop_count}] {name} ({code}-{sec}) 여석 대기 중 (0석)...")
+                        continue
+
+                    logger.info(f"🔥 [빈자리 포착!] {name} ({code}-{sec}) 여석 {seats if seats is not None else '?'}석 발견! 즉각 신청 전송...")
                     success, msg = self.try_apply_course(code, sec)
                     
                     if success:
