@@ -1,29 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Daejin University 18-Credit Hard Limit Safe Atomic Swapper
-=========================================================
-Facts:
-  - Current Credits: 17
-  - Max Allowed Credits: 18 (Hard Server Limit)
-  - Target Courses: 2 credits each (922605-01 or 922616-02)
-  - 17 + 2 = 19 > 18 -> Direct apply WITHOUT drop is REJECTED by server.
-
-Atomic Protocol:
-  1. Passive Watchdog: Continuously check remaining seats for:
-     - Target 1: 922605-01 (AI기반프로그래밍입문 / 화 15:30) [Priority 1]
-     - Target 2: 922616-02 (AI시대의콘텐츠크리에이션 02분반 / 목 15:30) [Priority 2]
-  2. While seats == 0: NEVER touch currently held course (100% safe).
-  3. The moment seats > 0 for either target:
-     - Step 1: Drop currently held course in ~10ms (Credits drop: 17 -> 15)
-     - Step 2: Apply opened target in ~10ms (Credits become: 15 + 2 = 17)
-     - Step 3 (Verification):
-         * If Success:
-             - If 922605-01 secured -> Mission Complete! Discord alert & exit.
-             - If 922616-02 secured -> Update held to 922616-02, continue monitoring for 922605-01!
-         * If Fail (sniped by someone else in that 10ms window):
-             - Instant Rollback Step A: Re-apply originally held course in ~10ms
-             - Instant Rollback Step B: If Step A fails, apply alternative 616 section in ~10ms
+Daejin University Credit-Aware Safe Atomic Swapper (학점 한도 초과 방지 원자적 수강 교체기)
+========================================================================================
+- Use Case:
+  - 수강신청 최대 가능 학점(예: 18학점)이 이미 꽉 차 있어서 그냥 신청하면 서버에서 학점 초과로 튕길 때 사용.
+- Protocol:
+  1. Passive Watchdog: 희망 목표 과목의 잔여석을 실시간 모니터링 (자리가 없으면 기존 과목을 절대 건드리지 않음).
+  2. The Instant Seats > 0:
+     - Step 1: 기존 보유 과목 삭제(Drop) 요청 전송 (~10ms) -> 학점 확보
+     - Step 2: 목표 과목 즉시 수강신청(Apply) 전송 (~10ms) -> 교체 완료
+     - Step 3 (안전 롤백): 만약 그 사이에 다른 사람이 낚아채서 실패할 경우, 즉시 원래 과목(또는 대안 과목)으로 재신청 롤백.
 """
 
 import os
@@ -35,24 +22,24 @@ import random
 import logging
 import datetime
 import requests
+from bs4 import BeautifulSoup
 
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-logger = logging.getLogger("CreditAwareSwapper")
+logger = logging.getLogger("AtomicSwapper")
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 BASE_URL = "https://dreams2.daejin.ac.kr"
 LOGIN_API_URL = f"{BASE_URL}/sugang/NLoginB"
 APPLY_API_URL = f"{BASE_URL}/sugang/NSugangWlsn0410"
-QUERY_URL = f"{BASE_URL}/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42006&ppage=1"
 CONFIRMED_URL = f"{BASE_URL}/sugang/new/sugang_wlsn04110.jsp"
 
 
-class DaejinCreditAwareSwapper:
+class DaejinAtomicSwapper:
     def __init__(self, config_path="config.json"):
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
@@ -63,30 +50,45 @@ class DaejinCreditAwareSwapper:
         self.discord_bot_token = self.config.get("discord_bot_token", "")
         self.discord_channel_id = self.config.get("discord_channel_id", "")
 
-        self.c_616_01 = {
+        # Swap Targets Configuration
+        swap_cfg = self.config.get("swap_targets", {})
+        
+        # 1. Course to Drop
+        drop_raw = swap_cfg.get("drop_course", {
             "name": "AI시대의콘텐츠크리에이션(01분반)",
             "code": "922616",
-            "bun": "01",
-            "full_code": "92261601",
-            "credits": 2
+            "bun": "01"
+        })
+        self.drop_course_info = {
+            "name": drop_raw.get("name", "DropCourse"),
+            "code": str(drop_raw["code"]),
+            "bun": str(drop_raw["bun"]).zfill(2),
+            "full_code": f"{str(drop_raw['code'])}{str(drop_raw['bun']).zfill(2)}"
         }
-        self.c_616_02 = {
-            "name": "AI시대의콘텐츠크리에이션(02분반)",
-            "code": "922616",
-            "bun": "02",
-            "full_code": "92261602",
-            "credits": 2
-        }
-        self.c_605_01 = {
-            "name": "AI기반프로그래밍입문(01분반)",
-            "code": "922605",
-            "bun": "01",
-            "full_code": "92260501",
-            "credits": 2
-        }
+        self.currently_held = dict(self.drop_course_info)
 
-        # Track currently held course
-        self.currently_held = self.c_616_01
+        # 2. Wanted Courses (in priority order)
+        wanted_raw = swap_cfg.get("wanted_courses", [
+            {"name": "AI기반프로그래밍입문(01분반)", "code": "922605", "bun": "01"},
+            {"name": "AI시대의콘텐츠크리에이션(02분반)", "code": "922616", "bun": "02"}
+        ])
+        self.wanted_courses = []
+        for w in wanted_raw:
+            self.wanted_courses.append({
+                "name": w.get("name", "WantedCourse"),
+                "code": str(w["code"]),
+                "bun": str(w["bun"]).zfill(2),
+                "full_code": f"{str(w['code'])}{str(w['bun']).zfill(2)}"
+            })
+
+        # 3. Rollback Course (default to drop_course if not set)
+        rb_raw = swap_cfg.get("rollback_course", self.drop_course_info)
+        self.rollback_course_info = {
+            "name": rb_raw.get("name", self.drop_course_info["name"]),
+            "code": str(rb_raw["code"]),
+            "bun": str(rb_raw["bun"]).zfill(2),
+            "full_code": f"{str(rb_raw['code'])}{str(rb_raw['bun']).zfill(2)}"
+        }
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -119,13 +121,11 @@ class DaejinCreditAwareSwapper:
         try:
             r = self.session.get(CONFIRMED_URL, timeout=4)
             html = r.content.decode("euc-kr", "replace")
-            if "922616-02" in html:
-                self.currently_held = self.c_616_02
-            elif "922616-01" in html:
-                self.currently_held = self.c_616_01
-            elif "922605-01" in html:
-                self.currently_held = self.c_605_01
-            logger.info(f"📋 Enrolled course verified: {self.currently_held['name']}")
+            for w in self.wanted_courses:
+                if f"{w['code']}-{w['bun']}" in html or w['full_code'] in html:
+                    self.currently_held = w
+                    break
+            logger.info(f"📋 Currently holding: {self.currently_held['name']} ({self.currently_held['full_code']})")
         except Exception as e:
             logger.warning(f"Sync error: {e}")
 
@@ -134,22 +134,32 @@ class DaejinCreditAwareSwapper:
             logger.info("🔄 Refreshing session token...")
             self.login()
 
-    def check_seats(self):
+    def check_seat_for_course(self, course_info):
+        """Checks real-time remaining seats from observer API or university portal."""
+        # Try fast local observer endpoint first if available
         try:
-            r = self.session.get(QUERY_URL, timeout=4)
+            r = requests.get("http://127.0.0.1:8888/api/data", timeout=1.0)
+            if r.status_code == 200:
+                data = r.json()
+                for c in data.get("courses", []):
+                    if c["full_code"] == course_info["full_code"]:
+                        return c.get("seats", 0)
+        except Exception:
+            pass
+
+        # Fallback to direct query on university portal
+        try:
+            url = f"{BASE_URL}/sugang/new/sugang_wlsn0417_2.jsp?ic_kwa=B41002&ic_kwa_1=B42006&ppage=1"
+            r = self.session.get(url, timeout=3)
             html = r.content.decode("euc-kr", "replace")
-            
-            results = {}
-            for key in ["92260501", "92261602"]:
-                m = re.search(rf'class=[\"\']seat[\"\'][^>]*data-key=[\"\']{key}[\"\'][^>]*>(\d+)<', html)
-                if m:
-                    results[key] = int(m.group(1))
-                else:
-                    results[key] = 0
-            return results
+            soup = BeautifulSoup(html, "html.parser")
+            for tr in soup.find_all("tr"):
+                cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if len(cols) >= 9 and cols[1] == f"{course_info['code']}-{course_info['bun']}":
+                    return int(cols[8]) if cols[8].isdigit() else 0
         except Exception as e:
-            logger.warning(f"Seat query error: {e}")
-            return {}
+            logger.debug(f"Seat query error: {e}")
+        return 0
 
     def drop_course(self, course_info):
         payload = {
@@ -161,7 +171,7 @@ class DaejinCreditAwareSwapper:
         try:
             r = self.session.post(APPLY_API_URL, data=payload, timeout=3)
             text = r.content.decode("euc-kr", "replace")
-            logger.info(f"🗑️ [Drop Request] {course_info['name']} ({course_info['full_code']})")
+            logger.info(f"🗑️ [Drop Request Sent] {course_info['name']} ({course_info['full_code']})")
             return "삭제" in text or "완료" in text or r.status_code == 200
         except Exception as e:
             logger.error(f"Drop error: {e}")
@@ -206,13 +216,13 @@ class DaejinCreditAwareSwapper:
         old = self.currently_held
         logger.info(f"🚨 [ATOMIC SWAP TRIGGERED] Dropping {old['name']} -> Sniping {target_course['name']}...")
         
-        # Step 1: Drop old course (17 -> 15 credits)
+        # Step 1: Drop old course
         t0 = time.perf_counter()
         dropped = self.drop_course(old)
         t_drop = (time.perf_counter() - t0) * 1000
         logger.info(f"   ↳ Step 1 (Drop Old): {t_drop:.1f}ms | Success={dropped}")
 
-        # Step 2: Apply new course (15 -> 17 credits)
+        # Step 2: Apply new course
         t1 = time.perf_counter()
         applied, alert = self.apply_course(target_course)
         t_apply = (time.perf_counter() - t1) * 1000
@@ -221,57 +231,39 @@ class DaejinCreditAwareSwapper:
         if applied:
             logger.info(f"🎉🎉 [SWAP SUCCESSFUL] Successfully enrolled into {target_course['name']}!")
             self.currently_held = target_course
-            
-            # If 605-01 secured -> Final Mission Finished!
-            if target_course["code"] == "922605":
-                self.send_discord_alert(
-                    f"🎉🎉 **[최종 목표 달성! 수강신청 교체 완료]** 🎉🎉\n"
-                    f"👤 **학번**: `{self.std_no}`\n"
-                    f"✅ **최종 확정**: **AI기반프로그래밍입문 (922605-01)** (화 15:30)\n"
-                    f"🗑️ **기존 취소**: **{old['name']}**\n"
-                    f"⚡ **스왑 소요 시간**: `{t_drop + t_apply:.1f}ms`\n"
-                    f"👉 꿀과목으로 최종 교체 완료했습니다!"
-                )
-                return True, True # (success, is_final)
-            else:
-                # 616-02 secured -> intermediate step!
-                self.send_discord_alert(
-                    f"🎉 **[중간 분반 교체 성공]** {old['name']} ➡️ **616-02(목15:30)** 교체 완료!\n"
-                    f"👉 605-01(AI프로그래밍입문) 취소표 계속 감시 진행 중!"
-                )
-                return True, False
+            self.send_discord_alert(
+                f"🎉🎉 **[수강신청 원자적 교체 성공]** 🎉🎉\n"
+                f"👤 **학번**: `{self.std_no}`\n"
+                f"✅ **신규 확정**: **{target_course['name']} ({target_course['code']}-{target_course['bun']})**\n"
+                f"🗑️ **기존 취소**: **{old['name']}**\n"
+                f"⚡ **스왑 소요 시간**: `{t_drop + t_apply:.1f}ms`"
+            )
+            return True
 
         else:
-            logger.warning(f"⚠️ [APPLY FAILED] Reason: {alert}. Initiating instant rollback to {old['name']}...")
-            # Step 3: Rollback to old course
+            logger.warning(f"⚠️ [APPLY FAILED] Reason: {alert}. Initiating instant rollback...")
+            # Step 3: Rollback to original/backup course
             t2 = time.perf_counter()
-            rb_success, rb_alert = self.apply_course(old)
+            rb_success, rb_alert = self.apply_course(self.rollback_course_info)
             t_rb = (time.perf_counter() - t2) * 1000
-            logger.info(f"   ↳ Step 3 (Rollback Old): {t_rb:.1f}ms | Success={rb_success} | Alert='{rb_alert}'")
+            logger.info(f"   ↳ Step 3 (Rollback): {t_rb:.1f}ms | Success={rb_success} | Alert='{rb_alert}'")
 
             if rb_success:
-                logger.info(f"🛡️ [ROLLBACK COMPLETE] {old['name']} 안전하게 원상복구 완료.")
+                logger.info(f"🛡️ [ROLLBACK COMPLETE] {self.rollback_course_info['name']} 안전하게 원상복구 완료.")
             else:
-                # Step 3.5: Emergency backup to other 616 section
-                backup = self.c_616_02 if old == self.c_616_01 else self.c_616_01
-                logger.warning(f"⚠️ 원래 과목 복구 실패 -> {backup['name']} 즉시 비상 낚아채기...")
-                t3 = time.perf_counter()
-                bk_success, bk_alert = self.apply_course(backup)
-                t_bk = (time.perf_counter() - t3) * 1000
-                logger.info(f"   ↳ Step 3.5 (Emergency Backup): {t_bk:.1f}ms | Success={bk_success} | Alert='{bk_alert}'")
-                if bk_success:
-                    self.currently_held = backup
-                    logger.info(f"🛡️ {backup['name']}으로 대체 복구 성공!")
-                else:
-                    logger.error("🚨 [CRITICAL ALERT] All rollbacks failed!")
-                    self.send_discord_alert(
-                        f"🚨🚨 **[긴급 수동 확인 요망]** 스왑 및 롤백 실패 경보 발생! 즉시 수강신청 확인/취소 메뉴를 확인해주세요!"
-                    )
-            return False, False
+                logger.error("🚨 [CRITICAL ALERT] Rollback failed! Manual action required.")
+                self.send_discord_alert(
+                    f"🚨🚨 **[긴급 수동 확인 요망]** 스왑 및 롤백 실패 경보 발생! 즉시 수강신청 확인/취소 메뉴를 확인해주세요!"
+                )
+            return False
 
     def run(self):
         logger.info("=" * 70)
-        logger.info("🛡️ Daejin University 18-Credit Hard Limit Safe Swapper")
+        logger.info("🛡️ Daejin University Credit-Aware Safe Atomic Swapper")
+        logger.info(f"   - Drop Target: {self.drop_course_info['name']} ({self.drop_course_info['full_code']})")
+        logger.info(f"   - Wanted Targets ({len(self.wanted_courses)}):")
+        for i, w in enumerate(self.wanted_courses):
+            logger.info(f"     [{i+1}순위] {w['name']} ({w['full_code']})")
         logger.info("=" * 70)
 
         if not self.login():
@@ -283,34 +275,30 @@ class DaejinCreditAwareSwapper:
         while True:
             loop += 1
             self.ensure_session()
-            
-            seat_map = self.check_seats()
-            s_605_01 = seat_map.get("92260501", 0)
-            s_616_02 = seat_map.get("92261602", 0)
 
-            if loop % 25 == 0:
-                logger.info(f"⏳ [감시 #{loop}] 605-01 여석: {s_605_01} | 616-02 여석: {s_616_02} | 현재보유: {self.currently_held['name']}")
-
-            # Priority 1: 605-01 opens -> Final Swap!
-            if s_605_01 > 0:
-                logger.info(f"🔥 [최종 목표 발견] 605-01 여석 {s_605_01}개 발생!")
-                success, is_final = self.perform_atomic_swap(self.c_605_01)
-                if is_final:
+            for target in self.wanted_courses:
+                if target["full_code"] == self.currently_held["full_code"]:
+                    continue
+                seats = self.check_seat_for_course(target)
+                if loop % 25 == 0:
+                    logger.info(f"⏳ [감시 #{loop}] {target['name']} 여석: {seats}석 | 현재보유: {self.currently_held['name']}")
+                
+                if seats > 0:
+                    logger.info(f"🔥 [빈자리 발견!] {target['name']} 여석 {seats}석 오픈! 즉각 교체 진행...")
+                    swapped = self.perform_atomic_swap(target)
+                    if swapped:
+                        # If reached first priority, we are done
+                        if target == self.wanted_courses[0]:
+                            logger.info("🏆 1순위 최우선 과목 교체 완료! 모니터링을 종료합니다.")
+                            return
+                    time.sleep(1.0)
                     break
-                time.sleep(1.0)
 
-            # Priority 2: 616-02 opens while holding 616-01 -> Shift to 616-02!
-            elif s_616_02 > 0 and self.currently_held == self.c_616_01:
-                logger.info(f"🔥 [중간 분반 발견] 616-02 여석 {s_616_02}개 발생!")
-                self.perform_atomic_swap(self.c_616_02)
-                time.sleep(1.0)
-
-            # Sleep 1.1s with random jitter
             jitter = random.uniform(-0.15, 0.15)
-            time.sleep(max(0.6, 1.1 + jitter))
+            time.sleep(max(0.6, 1.2 + jitter))
 
 
 if __name__ == "__main__":
     cfg_file = sys.argv[1] if len(sys.argv) > 1 else "config.json"
-    swapper = DaejinCreditAwareSwapper(cfg_file)
+    swapper = DaejinAtomicSwapper(cfg_file)
     swapper.run()

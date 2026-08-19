@@ -94,26 +94,128 @@ python3 atomic_swapper.py config.json
 
 ---
 
-## ⚙️ 4. 설정 파일 구성 (`config.json` & `targets.json`)
+## ⚙️ 4. 설정 파일 및 모듈별 `config.json` 스키마 가이드
 
-### `config.json` (계정 및 목표 과목 설정)
+모든 자동화 도구(`packet_sniper.py`, `vacancy_hunter.py`, `atomic_swapper.py`, `sugang.py`)는 동일한 `config.json` 파일을 공유하며, 각 모듈에 필요한 블록만 채워 넣으면 바로 작동합니다.
+
+### 📋 통합 `config.json` 전체 템플릿
 ```json
 {
   "stdNo": "20261236",
-  "passwd": "YOUR_PASSWORD",
+  "passwd": "YOUR_PORTAL_PASSWORD",
   "user_flag": "1",
+  "discord_bot_token": "",
+  "discord_channel_id": "",
+
   "target_time": "10:00:00",
   "courses": [
-    { "code": "576006", "section": "01", "name": "자바프로그래밍언어" },
-    { "code": "577503", "section": "01", "name": "정보보호개론" }
+    {
+      "name": "자바프로그래밍언어",
+      "code": "576006",
+      "bun": "01",
+      "fallback_bun": ["02", "03"]
+    },
+    {
+      "name": "대순사상과상생윤리",
+      "code": "927430",
+      "bun": "15",
+      "fallback_bun": ["19", "18", "21", "22", "03"]
+    }
   ],
+
+  "hunter_poll_interval": 1.5,
   "hunter_targets": [
-    { "code": "922613", "section": "01", "name": "AI와스마트라이프" }
+    {
+      "name": "대순사상과상생윤리 (03분반 꿀교수)",
+      "code": "927430",
+      "bun": "03"
+    },
+    {
+      "name": "영어읽기와토론 (12분반)",
+      "code": "927284",
+      "bun": "12"
+    }
   ],
-  "discord_bot_token": "",
-  "discord_channel_id": ""
+
+  "swap_targets": {
+    "drop_course": {
+      "name": "대순사상과상생윤리 (현재 보유 분반)",
+      "code": "927430",
+      "bun": "25"
+    },
+    "wanted_courses": [
+      {
+        "name": "1순위: AI기반프로그래밍입문",
+        "code": "922605",
+        "bun": "01"
+      },
+      {
+        "name": "2순위: AI시대의콘텐츠크리에이션",
+        "code": "922616",
+        "bun": "02"
+      }
+    ],
+    "rollback_course": {
+      "name": "롤백용 안전 대안과목",
+      "code": "927430",
+      "bun": "25"
+    }
+  }
 }
 ```
+
+---
+
+### 🔍 모듈별 필수 스키마 상세 설명
+
+#### 1) 공통 설정 (Common)
+| 필드명 | 타입 | 필수 여부 | 설명 |
+|---|---|---|---|
+| `stdNo` | `string` | **필수** | 대진대학교 포털 학번 8자리 (예: `"20261236"`) |
+| `passwd` | `string` | **필수** | 대진대학교 포털 비밀번호 |
+| `user_flag` | `string` | 선택 (기본 `"1"`) | 재학생 구분 플래그 (`"1"`: 학부생) |
+| `discord_bot_token` | `string` | 선택 | 성공 알림 전송용 디스코드 봇 토큰 (미사용 시 `""`) |
+| `discord_channel_id` | `string` | 선택 | 알림 수신할 디스코드 채널 ID (미사용 시 `""`) |
+
+---
+
+#### 2) `packet_sniper.py` (정각 10:00:00 일괄 스나이퍼) 스키마
+10시 정각 수강신청 오픈과 동시에 멀티스레드로 쏠 과목 목록과 분반 마감 시 대체할 2지망 체인을 설정합니다.
+
+| 필드명 | 타입 | 설명 |
+|---|---|---|
+| `target_time` | `string` | 발사 목표 시각 (KST, 형식: `"10:00:00"`) |
+| `courses` | `array` | 동시 신청할 1지망 과목 객체 배열 |
+| `courses[].code` | `string` | 6자리 과목번호 (예: `"576006"`) |
+| `courses[].bun` | `string` | 2자리 분반 (예: `"01"`) |
+| `courses[].name` | `string` | 식별용 과목명 |
+| `courses[].fallback_bun` | `array[string]` | **1지망 마감 시 5ms 내 즉시 순차 시도할 대체 분반 목록** (예: `["02", "03"]`) |
+
+---
+
+#### 3) `vacancy_hunter.py` (24시간 백그라운드 취소표 헌터) 스키마
+누군가 취소하여 빈자리가 나는 순간 즉시 주워담을 목표 과목들을 설정합니다.
+
+| 필드명 | 타입 | 설명 |
+|---|---|---|
+| `hunter_poll_interval` | `float` | 잔여석 감시 폴링 주기 초 단위 (기본: `1.5`초) |
+| `hunter_targets` | `array` | 빈자리 발생 시 즉시 낚아챌 목표 과목 객체 배열 |
+| `hunter_targets[].code` | `string` | 6자리 과목번호 (예: `"927430"`) |
+| `hunter_targets[].bun` | `string` | 2자리 분반 (예: `"03"`) |
+| `hunter_targets[].name` | `string` | 식별용 과목명 |
+
+---
+
+#### 4) `atomic_swapper.py` (학점 한도 초과 방지 원자적 맞교환기) 스키마
+학점(18학점)이 가득 차 있어 신규 신청이 불가능할 때, 목표 과목에 자리가 생기는 순간 **기존 과목 드랍 ➔ 신규 과목 신청**을 10ms 만에 원자적으로 맞바꿉니다.
+
+| 필드명 | 타입 | 설명 |
+|---|---|---|
+| `swap_targets.drop_course` | `object` | **자리가 났을 때 버릴(취소할) 현재 보유 과목** (`code`, `bun`, `name`) |
+| `swap_targets.wanted_courses` | `array` | **감시할 희망 과목 목록 (우선순위 순서대로 배치)** (`code`, `bun`, `name`) |
+| `swap_targets.rollback_course` | `object` | **교체 신청이 찰나에 실패했을 때 안전하게 원상복구할 백업 과목** |
+
+---
 
 ### `targets.json` (웹 옵저버 모니터링 대상 - 핫 리로드 지원)
 서버 재시작 없이 `targets.json`에 학과/영역 URL을 추가하면 옵저버가 실시간으로 자동 감지하여 모니터링에 반영합니다.

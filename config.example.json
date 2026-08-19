@@ -1,18 +1,21 @@
 {
+  "_comment_account": "대진대학교 포털 로그인 계정 정보",
   "stdNo": "20261236",
-  "passwd": "YOUR_PASSWORD_HERE",
+  "passwd": "YOUR_PORTAL_PASSWORD",
   "user_flag": "1",
-  "target_time": "10:00:00",
-  "headless": true,
+
+  "_comment_notifications": "디스코드 알림 연동 (선택사항 - 비워두면 비활성화)",
   "discord_bot_token": "",
   "discord_channel_id": "",
-  "hunter_poll_interval": 1.5,
+
+  "_comment_sniper": "[1] packet_sniper.py 설정 (정각 10:00:00 일괄 자동신청)",
+  "target_time": "10:00:00",
   "courses": [
     {
       "name": "자바프로그래밍언어",
       "code": "576006",
       "bun": "01",
-      "fallback_bun": []
+      "fallback_bun": ["02", "03"]
     },
     {
       "name": "대순사상과상생윤리",
@@ -21,6 +24,9 @@
       "fallback_bun": ["19", "18", "21", "22", "03"]
     }
   ],
+
+  "_comment_hunter": "[2] vacancy_hunter.py 설정 (24시간 백그라운드 취소표 낚아채기)",
+  "hunter_poll_interval": 1.5,
   "hunter_targets": [
     {
       "name": "대순사상과상생윤리 (03분반 꿀교수)",
@@ -32,5 +38,31 @@
       "code": "927284",
       "bun": "12"
     }
-  ]
+  ],
+
+  "_comment_swapper": "[3] atomic_swapper.py 설정 (학점 꽉 찼을 때 원자적 맞교환기)",
+  "swap_targets": {
+    "drop_course": {
+      "name": "대순사상과상생윤리 (현재 보유 분반)",
+      "code": "927430",
+      "bun": "25"
+    },
+    "wanted_courses": [
+      {
+        "name": "1순위: AI기반프로그래밍입문",
+        "code": "922605",
+        "bun": "01"
+      },
+      {
+        "name": "2순위: AI시대의콘텐츠크리에이션",
+        "code": "922616",
+        "bun": "02"
+      }
+    ],
+    "rollback_course": {
+      "name": "롤백용 안전 대안과목",
+      "code": "927430",
+      "bun": "25"
+    }
+  }
 }
