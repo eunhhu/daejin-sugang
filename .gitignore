@@ -8,3 +8,6 @@ __pycache__/
 .env
 .venv
 db_cache.json
+push_subs.json
+vapid_keys.json
+vapid_private.pem

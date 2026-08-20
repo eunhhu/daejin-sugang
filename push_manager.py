@@ -19,13 +19,33 @@ logger = logging.getLogger("WebPushManager")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VAPID_FILE = os.path.join(BASE_DIR, "vapid_keys.json")
+VAPID_PRIVATE_FILE = os.path.join(BASE_DIR, "vapid_private.pem")
 SUBS_FILE = os.path.join(BASE_DIR, "push_subs.json")
 
 class WebPushManager:
     def __init__(self):
         self.lock = threading.Lock()
         self.vapid_keys = self._load_or_create_vapid()
+        self._sync_private_key_file()
         self.subscriptions = self._load_subscriptions()
+
+    def _sync_private_key_file(self):
+        private_pem = self.vapid_keys["private_pem"]
+        current = None
+        try:
+            with open(VAPID_PRIVATE_FILE, "r", encoding="utf-8") as f:
+                current = f.read()
+        except FileNotFoundError:
+            pass
+        if current != private_pem:
+            temp_path = VAPID_PRIVATE_FILE + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(private_pem)
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, VAPID_PRIVATE_FILE)
+        else:
+            os.chmod(VAPID_PRIVATE_FILE, 0o600)
+        return VAPID_PRIVATE_FILE
 
     def _load_or_create_vapid(self):
         if os.path.exists(VAPID_FILE):
@@ -112,7 +132,7 @@ class WebPushManager:
             webpush(
                 subscription_info=sub_info,
                 data=json.dumps(payload, ensure_ascii=False),
-                vapid_private_key=self.vapid_keys["private_pem"],
+                vapid_private_key=self._sync_private_key_file(),
                 vapid_claims={"sub": self.vapid_keys.get("claims_sub", "mailto:admin@qucord.com")},
                 timeout=5
             )

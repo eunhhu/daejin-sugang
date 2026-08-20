@@ -119,6 +119,8 @@ class CourseCrawler:
             "Origin": BASE_URL
         })
         self.last_login_time = 0
+        self.next_login_retry_time = 0
+        self.login_failures = 0
         self.targets_mtime = 0
         self.scrape_targets = []
         self.reload_targets()
@@ -146,16 +148,29 @@ class CourseCrawler:
             text = r.content.decode("euc-kr", "replace")
             if "main.jsp" in text or "location.href" in text or r.status_code == 200:
                 self.last_login_time = time.time()
+                self.next_login_retry_time = 0
+                self.login_failures = 0
                 logger.info("✅ Scraper session authenticated.")
                 return True
+            self._schedule_login_retry()
             return False
         except Exception as e:
+            self._schedule_login_retry()
             logger.error(f"Login error: {e}")
             return False
 
+    def _schedule_login_retry(self):
+        self.login_failures += 1
+        delay = min(120, 10 * (2 ** (self.login_failures - 1)))
+        self.next_login_retry_time = time.time() + delay
+
     def ensure_session(self):
-        if time.time() - self.last_login_time > 600:
-            self.login()
+        now = time.time()
+        if now - self.last_login_time <= 600:
+            return True
+        if now < self.next_login_retry_time:
+            return False
+        return self.login()
 
     def fetch_url(self, url):
         try:
@@ -204,14 +219,15 @@ class CourseCrawler:
 
     def scrape_cycle(self):
         global cached_json_response
-        self.ensure_session()
         self.reload_targets()
-
         t0 = time.perf_counter()
         scraped_courses = []
 
-        with ThreadPoolExecutor(max_workers=12) as ex:
-            p1_results = list(ex.map(lambda t: (t["url"], t["name"], self.fetch_url(t["url"])), self.scrape_targets))
+        if self.ensure_session() is False:
+            p1_results = []
+        else:
+            with ThreadPoolExecutor(max_workers=12) as ex:
+                p1_results = list(ex.map(lambda t: (t["url"], t["name"], self.fetch_url(t["url"])), self.scrape_targets))
 
         all_page_jobs = []
         for base_url, cat_name, html in p1_results:
@@ -244,6 +260,29 @@ class CourseCrawler:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         now_str = datetime.datetime.now(KST).strftime("%H:%M:%S")
+
+        if not scraped_courses:
+            stats["total_courses"] = len(course_db)
+            stats["open_courses"] = sum(1 for c in course_db.values() if c.get("seats", 0) > 0)
+            stats["events_count"] = len(event_history)
+            cached_update_times = [c.get("last_updated") for c in course_db.values() if c.get("last_updated")]
+            if cached_update_times:
+                stats["last_scraped_at"] = max(cached_update_times)
+            stats["last_attempted_at"] = now_str
+            stats["scrape_latency_ms"] = round(elapsed_ms, 1)
+            stats["status"] = "Upstream Unavailable · Cached Data"
+            stats["consecutive_failures"] = stats.get("consecutive_failures", 0) + 1
+            cached_json_response = json.dumps({
+                "stats": dict(stats),
+                "events": list(event_history[:20]),
+                "courses": list(course_db.values())
+            }, ensure_ascii=False).encode("utf-8")
+            save_state_cache()
+            return {
+                "changes": [],
+                "new_events": [],
+                "stats": dict(stats)
+            }
 
         changes = []
         new_events = []
@@ -303,8 +342,10 @@ class CourseCrawler:
         stats["open_courses"] = open_count
         stats["events_count"] = len(event_history)
         stats["last_scraped_at"] = now_str
+        stats["last_attempted_at"] = now_str
         stats["scrape_latency_ms"] = round(elapsed_ms, 1)
         stats["status"] = "Live Streaming"
+        stats["consecutive_failures"] = 0
 
         cached_json_response = json.dumps({
             "stats": dict(stats),
@@ -1179,6 +1220,22 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
     }
 
+    function updateConnectionHealthUI(s) {
+      if (!s) return;
+      const badge = document.getElementById('connBadge');
+      const label = document.getElementById('connLabel');
+      if (!badge || !label) return;
+      if ((s.status || '').includes('Upstream Unavailable')) {
+        badge.className = "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/30";
+        label.innerText = "원본 서버 장애 · 캐시";
+        badge.title = `대진대 원본 서버 연결 실패 · 마지막 정상 수집 ${s.last_scraped_at || '-'}`;
+      } else if (eventSource && eventSource.readyState === EventSource.OPEN) {
+        badge.className = "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+        label.innerText = "SSE 라이브";
+        badge.title = '';
+      }
+    }
+
     function updateStatsUI(s) {
       if (!s) return;
       const setTxt = (id, val) => {
@@ -1191,6 +1248,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       setTxt('statStatus', s.status || 'Live');
       setTxt('lastUpdated', s.last_scraped_at || '-');
       setTxt('scrapeLatency', (s.scrape_latency_ms || 0) + 'ms');
+      updateConnectionHealthUI(s);
     }
 
     function renderEvents(events) {
@@ -1387,8 +1445,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           renderCourses();
           isInitialized = true;
 
-          document.getElementById('connBadge').className = "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
-          document.getElementById('connLabel').innerText = "SSE 라이브";
+          updateConnectionHealthUI(data.stats);
         });
 
         eventSource.addEventListener('update', (e) => {
