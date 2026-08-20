@@ -115,6 +115,11 @@ class CourseCrawler:
         self.user_flag = self.config.get("user_flag", "1")
 
         self.session = requests.Session()
+        self.session.trust_env = False
+        proxy_url = os.environ.get("DAEJIN_UPSTREAM_PROXY", "").strip()
+        if proxy_url:
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+            logger.info("🛡️ Dedicated upstream proxy enabled.")
         adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
         self.session.mount("https://", adapter)
         self.session.headers.update({

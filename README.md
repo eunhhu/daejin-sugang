@@ -244,6 +244,27 @@ sudo systemctl restart daejin-observer.service
 journalctl -u daejin-observer.service -f
 ```
 
+### Tailscale과 함께 쓰는 전용 WARP egress
+
+시스템 전체 VPN 모드 대신 Cloudflare WARP의 로컬 SOCKS5 `proxy` 모드를 사용합니다. 기본 라우트와 Tailscale은 유지되고, `CourseCrawler`의 전용 `requests.Session`만 WARP를 통과합니다.
+
+```bash
+# 최초 등록 시 1회만 실행
+warp-cli --accept-tos registration new
+warp-cli --accept-tos tunnel protocol set MASQUE
+warp-cli --accept-tos proxy port 18088
+warp-cli --accept-tos mode proxy
+warp-cli --accept-tos connect
+
+sudo install -d -m 0755 /etc/systemd/system/daejin-observer.service.d
+sudo install -m 0644 deploy/daejin-observer.service.d/warp-proxy.conf \
+  /etc/systemd/system/daejin-observer.service.d/warp-proxy.conf
+sudo systemctl daemon-reload
+sudo systemctl restart daejin-observer.service
+```
+
+`warp-cli status`가 `Connected`, `127.0.0.1:18088`이 리슨 중인지 확인한 뒤 사용합니다. WARP가 내려가도 옵저버는 마지막 정상 캐시를 보존하며 원본 로그인 재시도에는 백오프를 적용합니다.
+
 ---
 
 ## 📡 6. REST & SSE API 엔드포인트

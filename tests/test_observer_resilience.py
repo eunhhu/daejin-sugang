@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -203,6 +204,24 @@ class ObserverResilienceTests(unittest.TestCase):
     def test_ui_exposes_upstream_degraded_state(self):
         self.assertIn("원본 서버 장애 · 캐시", observer.HTML_CONTENT)
         self.assertIn("Upstream Unavailable", observer.HTML_CONTENT)
+
+    def test_crawler_applies_configured_proxy_only_to_upstream_session(self):
+        proxy_url = "socks5h://127.0.0.1:18088"
+        with patch.dict(
+            observer.os.environ,
+            {
+                "DAEJIN_UPSTREAM_PROXY": proxy_url,
+                "HTTPS_PROXY": "http://must-not-be-inherited.invalid:9999",
+            },
+            clear=False,
+        ):
+            crawler = observer.CourseCrawler()
+
+        self.assertEqual(crawler.session.proxies, {
+            "http": proxy_url,
+            "https": proxy_url,
+        })
+        self.assertFalse(crawler.session.trust_env)
 
     def test_upstream_rate_limits_are_conservative(self):
         self.assertGreaterEqual(observer.SCRAPE_LOOP_INTERVAL_SECONDS, 10)
