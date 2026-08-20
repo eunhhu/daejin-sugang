@@ -137,7 +137,7 @@ class ObserverResilienceTests(unittest.TestCase):
 
         self.assertFalse(ready)
         self.assertEqual(crawler.login_failures, 1)
-        self.assertEqual(crawler.next_login_retry_time, 1010)
+        self.assertEqual(crawler.next_login_retry_time, 2800)
 
     def test_failed_scrape_repairs_false_success_timestamp_from_course_cache(self):
         observer.course_db.clear()
@@ -203,6 +203,27 @@ class ObserverResilienceTests(unittest.TestCase):
     def test_ui_exposes_upstream_degraded_state(self):
         self.assertIn("원본 서버 장애 · 캐시", observer.HTML_CONTENT)
         self.assertIn("Upstream Unavailable", observer.HTML_CONTENT)
+
+    def test_upstream_rate_limits_are_conservative(self):
+        self.assertGreaterEqual(observer.SCRAPE_LOOP_INTERVAL_SECONDS, 10)
+        self.assertLessEqual(observer.SCRAPE_MAX_WORKERS, 4)
+        self.assertGreaterEqual(observer.LOGIN_RETRY_BASE_SECONDS, 1800)
+        self.assertGreaterEqual(observer.LOGIN_RETRY_MAX_SECONDS, 3600)
+
+    def test_login_backoff_caps_at_one_hour(self):
+        crawler = object.__new__(observer.CourseCrawler)
+        crawler.login_failures = 0
+        crawler.next_login_retry_time = 0
+        original_time = observer.time.time
+        observer.time.time = lambda: 1000
+        try:
+            crawler._schedule_login_retry()
+            self.assertEqual(crawler.next_login_retry_time, 2800)
+            crawler.login_failures = 10
+            crawler._schedule_login_retry()
+            self.assertEqual(crawler.next_login_retry_time, 4600)
+        finally:
+            observer.time.time = original_time
 
 
 if __name__ == "__main__":

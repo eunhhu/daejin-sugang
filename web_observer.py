@@ -46,6 +46,10 @@ CACHE_PATH = os.path.join(BASE_DIR, "db_cache.json")
 
 BASE_URL = "https://dreams2.daejin.ac.kr"
 LOGIN_API_URL = f"{BASE_URL}/sugang/NLoginB"
+SCRAPE_LOOP_INTERVAL_SECONDS = 10.0
+SCRAPE_MAX_WORKERS = 4
+LOGIN_RETRY_BASE_SECONDS = 1800
+LOGIN_RETRY_MAX_SECONDS = 3600
 
 # Global In-Memory State
 course_db: Dict[str, dict] = {}
@@ -161,7 +165,10 @@ class CourseCrawler:
 
     def _schedule_login_retry(self):
         self.login_failures += 1
-        delay = min(120, 10 * (2 ** (self.login_failures - 1)))
+        delay = min(
+            LOGIN_RETRY_MAX_SECONDS,
+            LOGIN_RETRY_BASE_SECONDS * (2 ** (self.login_failures - 1)),
+        )
         self.next_login_retry_time = time.time() + delay
 
     def ensure_session(self):
@@ -226,7 +233,7 @@ class CourseCrawler:
         if self.ensure_session() is False:
             p1_results = []
         else:
-            with ThreadPoolExecutor(max_workers=12) as ex:
+            with ThreadPoolExecutor(max_workers=SCRAPE_MAX_WORKERS) as ex:
                 p1_results = list(ex.map(lambda t: (t["url"], t["name"], self.fetch_url(t["url"])), self.scrape_targets))
 
         all_page_jobs = []
@@ -252,7 +259,7 @@ class CourseCrawler:
                     all_page_jobs.append((p_url, cat_name))
 
         if all_page_jobs:
-            with ThreadPoolExecutor(max_workers=12) as ex:
+            with ThreadPoolExecutor(max_workers=SCRAPE_MAX_WORKERS) as ex:
                 rem_results = list(ex.map(lambda job: (job[1], self.fetch_url(job[0])), all_page_jobs))
             for cat_name, html in rem_results:
                 if html:
@@ -400,7 +407,7 @@ async def broadcast_worker():
             logger.error(f"Crawler loop exception: {e}")
 
         try:
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(SCRAPE_LOOP_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             break
 
